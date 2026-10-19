@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node bridge.mjs",
-    "check": "node --check bridge.mjs && node --check mcp-http.mjs",
+    "check": "node --check bridge.mjs && node --check mcp-http.mjs && node --check mcp-oauth.mjs",
     "test": "node --test",
     "start:http": "node mcp-http.mjs"
   },

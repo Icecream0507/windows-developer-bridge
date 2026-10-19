@@ -92,7 +92,42 @@ function envFor(overrides) {
   }
   return env;
 }
-function psArgs() { return { file: process.env.WDB_POWERSHELL || "pwsh.exe", args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"] }; }
+function psArgs() {
+  const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"];
+  const candidates = [];
+  const configured = process.env.WDB_POWERSHELL;
+  if (configured && configured.trim()) candidates.push(configured.trim());
+  if (IS_WIN) {
+    const pathEntries = String(process.env.PATH || process.env.Path || "").split(path.delimiter).filter(Boolean);
+    for (const dir of pathEntries) {
+      const cleanDir = dir.replace(/^"(.*)"$/, "$1");
+      candidates.push(path.join(cleanDir, "pwsh.exe"));
+    }
+    const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+    candidates.push(path.join(programFiles, "PowerShell", "7", "pwsh.exe"));
+    const systemRoot = process.env.SystemRoot || process.env.WINDIR || "C:\\Windows";
+    candidates.push(path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
+  } else {
+    candidates.push("pwsh.exe");
+  }
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const key = IS_WIN ? candidate.toLowerCase() : candidate;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    try {
+      if (path.isAbsolute(candidate) && fs.statSync(candidate).isFile()) {
+        return { file: candidate, args: [...args, "-Command", "-"] };
+      }
+      if (!path.isAbsolute(candidate) && candidate === "pwsh.exe") {
+        return { file: candidate, args: [...args, "-Command", "-"] };
+      }
+    } catch {}
+  }
+  // Keep the conventional name as a last resort so Windows PATH resolution can
+  // produce the native spawn error if no supported PowerShell executable exists.
+  return { file: configured && configured.trim() ? configured.trim() : "pwsh.exe", args: [...args, "-Command", "-"] };
+}
 function appendBounded(current, chunk, maxBytes) {
   const combined = Buffer.concat([current, Buffer.from(chunk)]);
   return combined.length > maxBytes ? combined.subarray(combined.length - maxBytes) : combined;
