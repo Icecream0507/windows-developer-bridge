@@ -11,5 +11,13 @@
     "start": "node bridge.mjs",
     "check": "node --check bridge.mjs",
     "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Icecream0507/windows-developer-bridge.git"
+  },
+  "homepage": "https://github.com/Icecream0507/windows-developer-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/Icecream0507/windows-developer-bridge/issues"
   }
 }
