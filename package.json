@@ -1,0 +1,15 @@
+{
+  "name": "windows-developer-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows-first compatibility port of Mac Developer Bridge (MDB).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bridge.mjs",
+    "check": "node --check bridge.mjs",
+    "test": "node --test"
+  }
+}
