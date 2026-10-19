@@ -1,55 +1,128 @@
-# Windows Developer Bridge
+# Windows Developer Bridge (WDB)
 
-[![Windows CI](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Windows CI](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml) [![MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A Windows-first compatibility port of Mac Developer Bridge (MDB). This project is developed separately from the original macOS checkout.
+Windows-first compatibility port of Mac Developer Bridge. **Early implementation; not production-ready or a complete MDB mirror.** The HTTP adapter is new and needs Windows end-to-end validation.
 
-## Current status
+## Requirements
 
-**Early implementation; not yet a complete or production-ready mirror.** The MCP stdio server and an initial set of shell, filesystem, job, patch, and audit tools are implemented. The local macOS host is useful for protocol and filesystem tests, but Windows-only execution and process-tree behavior must be validated on Windows 10/11.
+- Windows 10/11
+- Node.js 20+ (LTS recommended)
+- Git for Windows
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+- PowerShell 7 recommended for shell tools
 
-## Roadmap
+## 1. Clone
 
-See [TODO.md](TODO.md) for the prioritized roadmap, security work, parity checklist, and release gates. The detailed [compatibility matrix](docs/compatibility-matrix.md) tracks every original MDB tool.
+Open PowerShell:
 
-## Implemented in this milestone
+```powershell
+git clone https://github.com/Icecream0507/windows-developer-bridge.git
+cd windows-developer-bridge
+node --version
+```
 
-- MCP JSON-RPC stdio framing: initialize, ping, tools/list, and tools/call.
-- bridge_status with platform/runtime information.
-- shell_exec using PowerShell on Windows, bounded output, timeout, environment overrides, working directory, and stdin.
-- shell_start, shell_job_status, shell_job_list, and shell_job_kill with persistent metadata/logs and taskkill /T process-tree termination.
-- fs_read, fs_write, fs_list, fs_stat, and fs_manage.
-- apply_patch through git apply.
-- Codex thread read/list/turn pagination wired to the Codex app-server (Windows app-server integration remains unverified).
-- Fail-closed FULL_ACCESS_ENABLED unlock latch, rechecked on tool calls, with a background poll that terminates known background-job process trees after revocation.
-- Append-only JSONL audit records and bounded audit_tail.
-- Initial Node.js tests for protocol negotiation, tool listing, status, filesystem round-trip/pagination, and fail-closed non-Windows shell behavior.
+No `npm install` is needed for the current version; it uses Node.js built-ins.
 
-## Not yet ported
+## 2. Start the authenticated MCP HTTP service
 
-The original MDB advertises 33 tools. This implementation currently advertises 16 of those names; 17 remain unported. See docs/compatibility-matrix.md for the tool-by-tool status. These areas still require design, implementation, and compatibility tests:
+Open PowerShell **Terminal A**. Generate a high-entropy token and start the HTTP adapter:
 
-- Windows Codex app-server launch, protocol compatibility, and persisted-history integration tests.
-- Real interactive terminals using Windows ConPTY, including reliable resize, signal/interrupt semantics, byte-cursor reads, bounded buffers, and session cleanup.
-- Chrome background workspace, extension/native messaging, ChatGPT extension status, and browser operations.
-- HTTP transport, OAuth, install/startup integration, kill switch, and full permission-revocation lifecycle.
-- Full compatibility for original tool schemas, error codes, annotations, audit redaction, timeout races, and process containment.
-- Windows-specific integration and adversarial tests.
+```powershell
+$env:WDB_HTTP_TOKEN = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+$env:WDB_HTTP_PORT = "8787"
+node .\mcp-http.mjs
+```
 
-## Development
+Keep this terminal open. Save the generated token privately; do not put it in the URL, source control, screenshots, or issue reports. If you restart the service, generate/set the token again.
 
-- Node.js 20 or newer.
-- Windows 10/11 x64 or ARM64 for actual PowerShell and process-tree tests.
-- PowerShell 7 (pwsh.exe) is the default. Set WDB_POWERSHELL to an alternate executable path if required.
-- Run node --check bridge.mjs.
-- Run node --test.
+Default local MCP endpoint: `http://127.0.0.1:8787/mcp`. The service binds to loopback, requires a Bearer token, and also provides `GET /healthz`.
 
-On non-Windows hosts, the MCP protocol and portable filesystem tools can be tested. PowerShell execution and job process control deliberately return a clear platform error rather than silently substituting a different shell.
+In **Terminal B**, verify local health:
 
-## Security model
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/healthz
+```
 
-The bridge starts locked. On Windows, first run bridge_status to see the expected unlock path, then explicitly create an empty file named FULL_ACCESS_ENABLED in the reported data directory (normally %LOCALAPPDATA%\\WindowsDeveloperBridge\\FULL_ACCESS_ENABLED). Removing that file locks subsequent tool calls and triggers cleanup of recorded background-job process trees. The bridge remains available for status inspection. This initial implementation does not yet match the original kill switch in every lifecycle detail.
+Expected: JSON containing `ok: true`. Verify the protected endpoint rejects unauthenticated requests (401 is expected):
 
-This bridge is intentionally powerful: commands and filesystem operations execute with the logged-in OS user's permissions. It is not a sandbox and does not enforce a filesystem path allowlist or command allowlist. Keep the stdio server attached to a trusted local MCP client; do not expose it directly to a network. The audit log redacts common credential-like values but is not a substitute for secret-safe command construction. Windows ACLs, process-tree containment, and revocation behavior still require review before production use.
+```powershell
+try { Invoke-WebRequest http://127.0.0.1:8787/mcp -Method Post -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":1,"method":"ping"}' } catch { $_.Exception.Response.StatusCode }
+```
 
-See SECURITY.md before enabling the unlock latch. This is an independent Windows-focused port project; it does not bundle the original macOS checkout.
+For an authenticated MCP protocol check, in Terminal B set the same token (paste it locally, do not share it):
+
+```powershell
+$env:WDB_HTTP_TOKEN = "PASTE_YOUR_TOKEN_HERE"
+$headers = @{ Authorization = "Bearer $env:WDB_HTTP_TOKEN"; Accept = "application/json, text/event-stream" }
+$body = @{ jsonrpc = "2.0"; id = 1; method = "initialize"; params = @{ protocolVersion = "2025-11-25"; capabilities = @{}; clientInfo = @{ name = "manual-test"; version = "1.0.0" } } } | ConvertTo-Json -Depth 8
+Invoke-RestMethod http://127.0.0.1:8787/mcp -Method Post -Headers $headers -ContentType "application/json" -Body $body
+```
+
+## 3. Start a Cloudflare Quick Tunnel
+
+Install `cloudflared` following [Cloudflare's official instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). On Windows, this may also work:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+Once installed, open **Terminal C** (keep Terminal A running) and run:
+
+```powershell
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+Wait for a URL like `https://some-words.trycloudflare.com` in the output. Your MCP URL is the exact URL printed by cloudflared with `/mcp` appended:
+
+`https://YOUR-ACTUAL-HOST.trycloudflare.com/mcp`
+
+The hostname is temporary and may change when the tunnel restarts. Keep both the HTTP server and tunnel running. Stop with Ctrl+C in Terminal C and then Terminal A.
+
+## 4. Configure your MCP client
+
+Add a **remote MCP / Streamable HTTP** server:
+
+- **Server URL:** `https://YOUR-ACTUAL-HOST.trycloudflare.com/mcp` (replace with the hostname cloudflared printed)
+- **Authentication:** Bearer token / custom Authorization header, if supported
+- **Header:** `Authorization: Bearer YOUR_WDB_HTTP_TOKEN`
+
+Do not enter the placeholder URL literally, and never append the token to the URL.
+
+**ChatGPT compatibility caveat:** this initial adapter supports authenticated JSON-RPC `POST /mcp`, `GET /healthz`, and static bearer-token authentication. It does not yet implement OAuth discovery/authorization or SSE streaming. Some ChatGPT connector setup flows require OAuth and do not provide a static bearer-header field; those flows are not supported by this adapter as-is. Do not select “No authentication” as a workaround. Use an MCP client that supports custom bearer headers, or add and test OAuth before claiming compatibility with an OAuth-only connector.
+
+## 5. Enable local tools deliberately
+
+The bridge starts with privileged tools locked. `bridge_status` can report status while locked, but shell and filesystem operations require the local unlock file. First call `bridge_status` and inspect its `unlockFile` field; on a standard Windows profile this is normally `%LOCALAPPDATA%\WindowsDeveloperBridge\FULL_ACCESS_ENABLED`.
+
+Read [SECURITY.md](SECURITY.md) before enabling it. Create an empty file at the exact path returned by `bridge_status` to unlock, and remove that same file to lock again. Only do this if you understand that enabled commands and file operations run with your Windows user's permissions. This is not a sandbox, and a public tunnel means remote parties can attempt to reach the service. Keep the token private and stop the tunnel when not in use.
+
+## Troubleshooting
+
+| Problem | Check |
+|---|---|
+| Token too short/missing | Set `WDB_HTTP_TOKEN` to a fresh random token as shown above. |
+| Local health works, remote URL fails | Keep both processes running; use the current Quick Tunnel hostname and append `/mcp`. |
+| `401 Unauthorized` | Supply `Authorization: Bearer <token>`; verify the client supports custom bearer headers. |
+| `404 Not found` | Endpoint is `/mcp`, not the root URL. |
+| `cloudflared` not recognized | Install it from Cloudflare's official guide and reopen PowerShell. |
+| Tools report full access locked | Check the `unlockFile` returned by `bridge_status` and review `SECURITY.md`. |
+| ChatGPT only offers OAuth/no-auth | OAuth is not implemented in this adapter yet. |
+
+## Development and tests
+
+```powershell
+node --check .\bridge.mjs
+node --check .\mcp-http.mjs
+node --test
+```
+
+The current automated suite primarily tests the stdio bridge. Dedicated HTTP auth, Cloudflare, OAuth/SSE, and Windows process-containment end-to-end tests are still needed.
+
+## Implemented and missing
+
+Initial implementation includes MCP stdio protocol, local PowerShell/filesystem/job tools, patch application, Codex history adapter, audit log, fail-closed unlock latch, and a bearer-authenticated HTTP JSON-RPC adapter. Still missing or unverified: OAuth, SSE/streaming, full original tool/schema parity, ConPTY, Chrome extension/native messaging, browser workspace, hardened Windows process containment, and complete revocation lifecycle. See [TODO.md](TODO.md) and [compatibility matrix](docs/compatibility-matrix.md).
+
+## Security
+
+The HTTP service binds to loopback by default. Cloudflare Quick Tunnels create a publicly reachable URL; bearer authentication is mandatory but is not a substitute for restricting access. Use a unique high-entropy token and stop the tunnel when it is not needed. See [SECURITY.md](SECURITY.md).

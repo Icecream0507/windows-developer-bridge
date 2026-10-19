@@ -9,8 +9,9 @@
   },
   "scripts": {
     "start": "node bridge.mjs",
-    "check": "node --check bridge.mjs",
-    "test": "node --test"
+    "check": "node --check bridge.mjs && node --check mcp-http.mjs",
+    "test": "node --test",
+    "start:http": "node mcp-http.mjs"
   },
   "repository": {
     "type": "git",
