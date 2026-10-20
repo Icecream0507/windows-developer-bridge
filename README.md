@@ -46,6 +46,22 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 
 ## 3. 日常使用
 
+### 以后怎么启动
+
+安装时已经自动启动过一次。**重启电脑后**（或执行过 `wdb stop` 后），打开 PowerShell 运行：
+
+```powershell
+wdb start
+```
+
+1. 屏幕上会显示新的 **MCP 地址**（已复制到剪贴板）和 **PIN**。
+2. 地址和上次不同时，到 ChatGPT 连接器设置里把 URL 换成新地址（PIN 不变，一般不用重新授权）。
+3. 服务在后台运行，关掉 PowerShell 窗口也不影响；用 `wdb status` 随时查看。
+
+> 提示 `wdb` 不是命令：新开一个终端窗口再试，或运行 `%LOCALAPPDATA%\WindowsDeveloperBridge\bin\wdb.cmd start`。
+
+### 全部命令
+
 | 命令 | 作用 |
 |---|---|
 | `wdb start` | 后台启动服务 + 隧道，打印 MCP 地址和 PIN（关掉终端也会继续运行） |
