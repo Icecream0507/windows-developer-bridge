@@ -1,6 +1,6 @@
 {
   "name": "windows-developer-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Windows-first MCP bridge: PowerShell, files, background jobs, ConPTY terminals and patches for ChatGPT/Claude, with OAuth and Cloudflare tunnel.",

@@ -130,10 +130,56 @@ function Start-Detached([string]$commandLine, [string]$workDir) {
 function Stop-Tree($procId) { if ($procId -and (Test-Pid $procId)) { & taskkill.exe /PID $procId /T /F 2>$null | Out-Null } }
 function Find-Strays([int]$port) {
   $escaped = [Regex]::Escape((Join-Path $AppDir "mcp-http.mjs"))
+  $sshTunnel = [Regex]::Escape((Join-Path $AppDir "lib\ssh-tunnel.mjs"))
   Get-CimInstance Win32_Process | Where-Object {
-    ($_.Name -eq "node.exe" -and $_.CommandLine -match $escaped) -or
-    ($_.Name -eq "cloudflared.exe" -and $_.CommandLine -match "127\.0\.0\.1:$port")
+    ($_.Name -eq "node.exe" -and ($_.CommandLine -match $escaped -or $_.CommandLine -match $sshTunnel)) -or
+    ($_.Name -eq "cloudflared.exe" -and $_.CommandLine -match "127\.0\.0\.1:$port") -or
+    ($_.Name -eq "ssh.exe" -and $_.CommandLine -match "-R 127\.0\.0\.1:\d+:127\.0\.0\.1:$port\b")
   }
+}
+# 隧道模式：none（仅本机）| quick（Cloudflare Quick Tunnel，地址会变）| named（Cloudflare 命名隧道）| ssh（自己的服务器，地址固定）
+function Get-TunnelMode($cfg) {
+  $mode = "$($cfg["WDB_TUNNEL"])".Trim().ToLower()
+  if ($mode -in @("none", "quick", "ssh")) { return $mode }
+  if ($cfg["CLOUDFLARE_TUNNEL_TOKEN"]) { return "named" }
+  return "quick"
+}
+function Get-Ssh($cfg) {
+  if ($cfg -and $cfg["WDB_SSH_BIN"]) { return $cfg["WDB_SSH_BIN"] }
+  $builtin = Join-Path $env:WINDIR "System32\OpenSSH\ssh.exe"
+  if (Test-Path $builtin) { return $builtin }
+  $onPath = Get-Command ssh -ErrorAction SilentlyContinue
+  if ($onPath) { return $onPath.Source }
+  return $null
+}
+function Test-SshLogin([string]$ssh, [string]$sshHost) {
+  $ErrorActionPreference = "Continue"
+  $out = & $ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $sshHost exit 2>&1 | Out-String
+  return @{ ok = ($LASTEXITCODE -eq 0); output = $out.Trim() }
+}
+# 返回公网地址 /healthz 的 HTTP 状态码：200 正常；503 服务器反代在、隧道没接上；0 访问不到
+function Test-PublicUrl([string]$url) {
+  try { return [int](Invoke-WebRequest -UseBasicParsing -Uri "$url/healthz" -TimeoutSec 10).StatusCode }
+  catch { if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }; return 0 }
+}
+function Read-LogTail([string]$log, [long]$bytes = 131072) {
+  if (-not (Test-Path $log)) { return "" }
+  return Read-LogSince $log ([Math]::Max(0, (Get-Item $log).Length - $bytes))
+}
+# 从隧道日志判断连接状况：ok | reconnecting | expired（Quick Tunnel 离线太久被 Cloudflare 回收，只能重建）
+function Get-TunnelHealth($state) {
+  $text = Read-LogTail (Join-Path $LogDir "tunnel.log")
+  if ($state.tunnel -eq "ssh") {
+    $up = $text.LastIndexOf(" connected: "); $down = $text.LastIndexOf(" disconnected: ")
+    if ($up -ge 0 -and $up -gt $down) { return "ok" }
+    return "reconnecting"
+  }
+  $registered = $text.LastIndexOf("Registered tunnel connection")
+  $notFound = $text.LastIndexOf("Tunnel not found")
+  if ($state.tunnel -eq "quick" -and $notFound -gt $registered) { return "expired" }
+  $failed = [Regex]::Matches($text, "Connection terminated|Serve tunnel error|Unable to establish connection") | Select-Object -Last 1
+  if ($failed -and $failed.Index -gt $registered) { return "reconnecting" }
+  return "ok"
 }
 function Get-PublicUrl($state) {
   if (-not $state) { return $null }
@@ -168,21 +214,56 @@ function Show-Connection($state) {
     Info ""
     Info "  连接 ChatGPT：设置 → Apps & Connectors（应用与连接器）→ 高级 → 开启开发者模式 → 创建连接器"
     Info "    URL 填上面的 MCP 地址，认证选 OAuth → 在弹出的授权页输入 PIN → 批准。"
-    Info "  注意：Quick Tunnel 地址每次 wdb start 都会变，变了需要在客户端里更新 URL。"
+    if ($state.tunnel -eq "quick") { Info "  注意：Quick Tunnel 地址每次 wdb start 都会变，变了需要在客户端里更新 URL（想要固定地址：wdb tunnel）。" }
+    else { Info "  这个地址是固定的：重启电脑、断网恢复后都不变，客户端里不用再改。" }
     try { Set-Clipboard -Value "$($state.publicUrl)/mcp"; Info "  （MCP 地址已复制到剪贴板）" } catch {}
   }
   Info ""
   Info "  常用：wdb status | wdb stop | wdb logs | wdb doctor | wdb help"
 }
 
+# SSH 反向隧道：lib/ssh-tunnel.mjs 常驻后台，断线自动重连，所以没连上也保留它继续重试
+function Start-SshTunnel($cfg, $state, [int]$port, [string]$node, [string]$envPrefix, [string]$tunnelLog) {
+  $sshHost = $cfg["WDB_SSH_HOST"]
+  $publicUrl = "$($cfg["WDB_HTTP_PUBLIC_URL"])".TrimEnd("/")
+  Title "启动 SSH 反向隧道（$sshHost → $publicUrl）"
+  if (-not $sshHost -or -not $publicUrl) { Warn "ssh 模式缺少配置，先运行：wdb tunnel ssh <SSH主机> <公网地址>"; return }
+  if (-not (Get-Ssh $cfg)) { Warn "未找到 ssh.exe：设置 → 系统 → 可选功能 → 添加「OpenSSH 客户端」"; return }
+  $offset = if (Test-Path $tunnelLog) { (Get-Item $tunnelLog).Length } else { 0 }
+  $script = Join-Path $AppDir "lib\ssh-tunnel.mjs"
+  $tunnelPid = Start-Detached "cmd.exe /d /s /c `"$envPrefix`"$node`" `"$script`" 1>>`"$tunnelLog`" 2>&1`"" $AppDir
+  $connected = $false
+  $deadline = (Get-Date).AddSeconds(45)
+  while ((Get-Date) -lt $deadline -and (Test-Pid $tunnelPid)) {
+    if ((Read-LogSince $tunnelLog $offset) -match " connected: ") { $connected = $true; break }
+    Start-Sleep -Milliseconds 400
+  }
+  if (-not (Test-Pid $tunnelPid)) {
+    Bad "SSH 隧道进程退出了："; Read-LogSince $tunnelLog $offset | Write-Host; return
+  }
+  $state.tunnelPid = $tunnelPid; $state.publicUrl = $publicUrl; $state.tunnel = "ssh"
+  if (-not $connected) {
+    $reason = (Read-LogSince $tunnelLog $offset) -split "`n" | Where-Object { $_ -match "disconnected: " } | Select-Object -Last 1
+    Warn "暂时没连上 $sshHost，后台会持续自动重连。$(if ($reason) { "原因：$(($reason -replace '^\S+ disconnected: ', '').Trim())" })"
+    return
+  }
+  Ok "SSH 隧道已连接"
+  $code = Test-PublicUrl $publicUrl
+  if ($code -eq 200) { Ok "公网地址可访问：$publicUrl" }
+  elseif ($code -eq 503) { Warn "服务器反代收到了请求，但隧道还没接通，稍等几秒后 wdb status 再看" }
+  else { Warn "从本机访问 $publicUrl 失败（HTTP $code）：检查云服务器安全组是否放行了端口、服务器反代是否在运行（wdb tunnel setup）" }
+}
+
 # ---------- 命令 ----------
 function Cmd-Start {
   $cfg = Ensure-Config
   $port = [int](Get-Option "port" $cfg["WDB_HTTP_PORT"])
-  $local = (Has-Flag "local") -or ($cfg["WDB_TUNNEL"] -eq "none")
+  $mode = if (Has-Flag "local") { "none" } else { Get-TunnelMode $cfg }
+  $local = $mode -eq "none"
   $state = Read-State
   if ($state -and (Test-Pid $state.httpPid) -and (Test-Health $state.port) -and ($local -or (Test-Pid $state.tunnelPid))) {
-    Ok "已经在运行"; Show-Connection $state; return
+    $previous = if ($state.mode) { $state.mode } else { $state.tunnel }
+    if ($previous -eq $mode -and ($local -or (Get-TunnelHealth $state) -ne "expired")) { Ok "已经在运行"; Show-Connection $state; return }
   }
   if ($state) { Stop-Tree $state.httpPid; Stop-Tree $state.tunnelPid }
   foreach ($p in Find-Strays $port) { Stop-Tree $p.ProcessId }
@@ -206,13 +287,15 @@ function Cmd-Start {
   }
   Ok "HTTP 服务已启动"
 
-  $state = [ordered]@{ httpPid = $httpPid; tunnelPid = $null; port = $port; publicUrl = $null; tunnel = $(if ($local) { "none" } else { "failed" }); startedAt = (Get-Date).ToString("o"); appDir = $AppDir }
-  if (-not $local) {
+  $state = [ordered]@{ httpPid = $httpPid; tunnelPid = $null; port = $port; publicUrl = $null; mode = $mode; tunnel = $(if ($local) { "none" } else { "failed" }); startedAt = (Get-Date).ToString("o"); appDir = $AppDir }
+  if ($mode -eq "ssh") {
+    Start-SshTunnel $cfg $state $port $node "${dataEnv}set `"WDB_HTTP_PORT=$port`"&& " $tunnelLog
+  } elseif (-not $local) {
     Title "启动 Cloudflare 隧道"
     $proxy = Find-Proxy $cfg
     $cloudflared = Get-Cloudflared
     if (-not $cloudflared) { $cloudflared = Install-Cloudflared $proxy }
-    $named = [bool]$cfg["CLOUDFLARE_TUNNEL_TOKEN"]
+    $named = $mode -eq "named"
     # cloudflared 申请 Quick Tunnel 和连接边缘节点都是直连（实测不读取 HTTPS_PROXY），
     # 代理变量只为将来版本保留；网络受限时需要代理软件的 TUN/虚拟网卡模式。接口偶尔超时，重试 3 次。
     $envPrefix = ""
@@ -269,9 +352,17 @@ function Cmd-Status {
   Title "Windows Developer Bridge 状态"
   Info "  程序目录: $AppDir"
   Info "  数据目录: $DataDir"
+  Info "  隧道模式: $(Describe-Mode $cfg)"
   if (Test-Health $port) { Ok "HTTP 服务运行中: http://127.0.0.1:$port/mcp" } else { Bad "HTTP 服务未运行（wdb start 启动）" }
   if ($state -and $state.publicUrl) {
-    if (Test-Pid $state.tunnelPid) { Ok "隧道运行中: $($state.publicUrl)/mcp" } else { Bad "隧道已退出（wdb restart 重新连接）" }
+    if (-not (Test-Pid $state.tunnelPid)) { Bad "隧道已退出（wdb restart 重新连接）" }
+    else {
+      switch (Get-TunnelHealth $state) {
+        "ok" { Ok "隧道运行中: $($state.publicUrl)/mcp" }
+        "reconnecting" { Warn "隧道断线，正在自动重连: $($state.publicUrl)/mcp（wdb logs tunnel 查看原因）" }
+        "expired" { Bad "隧道地址已失效：离线太久，Cloudflare 已回收 $($state.publicUrl)。运行 wdb restart 获取新地址，并在客户端里更新 URL（想要固定地址：wdb tunnel）" }
+      }
+    }
   } elseif ($state -and $state.tunnel -eq "none") { Info "  隧道: 未启用（本机模式）" }
   elseif ($state -and $state.tunnel -eq "failed") { Bad "隧道未连接（wdb doctor 检查网络，wdb restart 重试）" }
   if (Test-Path $UnlockFile) { Ok "完全访问已开启" } else { Warn "完全访问已锁定（wdb unlock 开启）" }
@@ -296,16 +387,33 @@ function Cmd-Doctor {
   if ($codex) { Ok "Codex CLI: $($codex.Source)" } else { Info "  [i]  未安装 Codex CLI（仅 codex_thread_* 工具需要）" }
   $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
   if (Test-Path $csc) { Ok "ConPTY 终端（pty_*）可用" } else { Warn "未找到 .NET Framework csc.exe，pty_* 工具不可用" }
-  $cf = Get-Cloudflared
-  if ($cf) { Ok "cloudflared: $cf" } else { Warn "未找到 cloudflared（wdb start 会自动下载）" }
-  $proxy = Find-Proxy (Read-Config)
-  if ($proxy) { Info "  [i]  检测到本地代理 $proxy（用于下载 cloudflared）" }
-  # cloudflared 直连：api.trycloudflare.com:443 申请隧道，边缘节点 7844 端口承载连接
-  foreach ($target in @(@("api.trycloudflare.com", 443), @("region1.v2.argotunnel.com", 7844))) {
-    $client = New-Object System.Net.Sockets.TcpClient
-    $reachable = $false
-    try { $ar = $client.BeginConnect($target[0], $target[1], $null, $null); $reachable = $ar.AsyncWaitHandle.WaitOne(5000) -and $client.Connected } catch {} finally { $client.Close() }
-    if ($reachable) { Ok "可直连 $($target[0]):$($target[1])" } else { Warn "无法直连 $($target[0]):$($target[1])：隧道可能连不上，国内网络请开启代理软件的 TUN / 虚拟网卡模式" }
+  $cfg = Read-Config
+  $mode = Get-TunnelMode $cfg
+  Info "  [i]  隧道模式: $(Describe-Mode $cfg)"
+  if ($mode -eq "ssh") {
+    $ssh = Get-Ssh $cfg
+    $url = "$($cfg["WDB_HTTP_PUBLIC_URL"])".TrimEnd("/")
+    if (-not $ssh) { Bad "未找到 ssh.exe：设置 → 系统 → 可选功能 → 添加「OpenSSH 客户端」" }
+    else {
+      $login = Test-SshLogin $ssh $cfg["WDB_SSH_HOST"]
+      if ($login.ok) { Ok "可免密码登录 $($cfg["WDB_SSH_HOST"])（$ssh）" } else { Bad "无法免密码登录 $($cfg["WDB_SSH_HOST"])：$($login.output)" }
+    }
+    $code = Test-PublicUrl $url
+    if ($code -eq 200) { Ok "公网地址可访问：$url" }
+    elseif ($code -eq 503) { Warn "服务器反代正常，但隧道没接通（wdb start 启动，wdb logs tunnel 看原因）" }
+    else { Bad "访问不了 $url（HTTP $code）：检查云服务器安全组是否放行端口、服务器上的 wdb-proxy 容器是否在运行（wdb tunnel setup 可重新配置）" }
+  } elseif ($mode -ne "none") {
+    $cf = Get-Cloudflared
+    if ($cf) { Ok "cloudflared: $cf" } else { Warn "未找到 cloudflared（wdb start 会自动下载）" }
+    $proxy = Find-Proxy $cfg
+    if ($proxy) { Info "  [i]  检测到本地代理 $proxy（用于下载 cloudflared）" }
+    # cloudflared 直连：api.trycloudflare.com:443 申请隧道，边缘节点 7844 端口承载连接
+    foreach ($target in @(@("api.trycloudflare.com", 443), @("region1.v2.argotunnel.com", 7844))) {
+      $client = New-Object System.Net.Sockets.TcpClient
+      $reachable = $false
+      try { $ar = $client.BeginConnect($target[0], $target[1], $null, $null); $reachable = $ar.AsyncWaitHandle.WaitOne(5000) -and $client.Connected } catch {} finally { $client.Close() }
+      if ($reachable) { Ok "可直连 $($target[0]):$($target[1])" } else { Warn "无法直连 $($target[0]):$($target[1])：隧道可能连不上，国内网络请开启代理软件的 TUN / 虚拟网卡模式" }
+    }
   }
   if (Test-Path $UnlockFile) { Ok "完全访问已开启" } else { Warn "完全访问已锁定（wdb unlock）" }
   Cmd-Status
@@ -336,6 +444,83 @@ function Cmd-McpConfig {
   $json = @{ mcpServers = @{ "windows-bridge" = @{ command = $node; args = @($bridge) } } } | ConvertTo-Json -Depth 5
   Info $json
 }
+function Describe-Mode($cfg) {
+  switch (Get-TunnelMode $cfg) {
+    "none" { return "仅本机（wdb tunnel quick / ssh 开启远程访问）" }
+    "quick" { return "Cloudflare Quick Tunnel（免配置，地址每次启动会变）" }
+    "named" { return "Cloudflare 命名隧道 $($cfg["WDB_HTTP_PUBLIC_URL"])（地址固定）" }
+    "ssh" { return "SSH 反向隧道 $($cfg["WDB_SSH_HOST"]) → $($cfg["WDB_HTTP_PUBLIC_URL"])（地址固定）" }
+  }
+}
+function Restart-Hint { if (Read-State) { Info "  运行 wdb restart 生效" } else { Info "  运行 wdb start 启动" } }
+function Assert-SshHost([string]$sshHost) {
+  if (-not $sshHost -or $sshHost.StartsWith("-") -or $sshHost -notmatch '^[A-Za-z0-9_.@-]+$') { throw "SSH 主机格式不对：填 ~/.ssh/config 里的 Host 别名，或 用户名@服务器地址" }
+}
+function Assert-SshLogin([string]$ssh, [string]$sshHost) {
+  if (-not $ssh) { throw "未找到 ssh.exe：设置 → 系统 → 可选功能 → 添加「OpenSSH 客户端」" }
+  $login = Test-SshLogin $ssh $sshHost
+  if (-not $login.ok) { throw "无法免密码登录 $sshHost：$($login.output)`n  隧道在后台运行，需要 SSH 密钥登录：先确认 ssh $sshHost 不用输密码就能登录。" }
+}
+function Use-SshTunnel([string]$sshHost, [string]$url, [int]$remotePort) {
+  Set-ConfigValue "WDB_TUNNEL" "ssh"
+  Set-ConfigValue "WDB_SSH_HOST" $sshHost
+  Set-ConfigValue "WDB_SSH_REMOTE_PORT" "$remotePort"
+  Set-ConfigValue "WDB_HTTP_PUBLIC_URL" $url
+}
+function Cmd-Tunnel {
+  $sub = if ($Options.Count -gt 0) { $Options[0].ToLower() } else { "" }
+  $remotePort = [int](Get-Option "remote-port" 18787)
+  switch ($sub) {
+    "quick" {
+      Set-ConfigValue "WDB_TUNNEL" "quick"; Set-ConfigValue "WDB_HTTP_PUBLIC_URL" ""
+      Ok "已切换为 Cloudflare Quick Tunnel（免配置，地址每次启动会变）"; Restart-Hint
+    }
+    "none" { Set-ConfigValue "WDB_TUNNEL" "none"; Ok "已关闭隧道：只能在本机访问 http://127.0.0.1:<端口>/mcp"; Restart-Hint }
+    "ssh" {
+      $sshHost = $Options[1]
+      $url = "$($Options[2])".Trim() -replace '/mcp/?$', '' -replace '/+$', ''
+      Assert-SshHost $sshHost
+      if ($url -notmatch '^https://[A-Za-z0-9.-]+(:\d{1,5})?$') { throw "用法：wdb tunnel ssh <SSH主机> <公网地址> [--remote-port 18787]，公网地址形如 https://example.com:8443" }
+      Assert-SshLogin (Get-Ssh (Read-Config)) $sshHost
+      Use-SshTunnel $sshHost $url $remotePort
+      Ok "已切换为 SSH 反向隧道：$sshHost → $url/mcp"
+      Info "  服务器上需要有把 $url 转到 127.0.0.1:$remotePort 的 HTTPS 反代（还没有的话：wdb tunnel setup $sshHost <域名>）"
+      Restart-Hint
+    }
+    "setup" {
+      $sshHost = $Options[1]
+      $domain = "$($Options[2])".Trim()
+      Assert-SshHost $sshHost
+      if ($domain -notmatch '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$') { throw "用法：wdb tunnel setup <SSH主机> <域名> [--port 8443] [--remote-port 18787]" }
+      $publicPort = [int](Get-Option "port" 8443)
+      $url = if ($publicPort -eq 443) { "https://$domain" } else { "https://${domain}:$publicPort" }
+      $ssh = Get-Ssh (Read-Config)
+      Assert-SshLogin $ssh $sshHost
+      $scp = Join-Path (Split-Path $ssh) "scp.exe"
+      if (-not (Test-Path $scp)) { $scp = (Get-Command scp -ErrorAction SilentlyContinue).Source }
+      if (-not $scp) { throw "未找到 scp.exe（OpenSSH 客户端的一部分）" }
+      Title "在 $sshHost 上配置 HTTPS 反代：$url → 127.0.0.1:$remotePort → SSH 隧道 → 本机"
+      $remote = "/tmp/wdb-setup-proxy-$PID.sh"
+      $ErrorActionPreference = "Continue"
+      & $scp -q -o BatchMode=yes (Join-Path $AppDir "scripts\server\setup-wdb-proxy.sh") "${sshHost}:$remote"
+      if ($LASTEXITCODE -ne 0) { throw "上传配置脚本到 $sshHost 失败" }
+      # 需要 sudo：-t 分配终端，服务器要求输入密码时可以直接输入
+      & $ssh -t $sshHost ('sed -i ''s/\r$//'' {0}; sudo bash {0} {1} {2} {3}; rc=$?; rm -f {0}; exit $rc' -f $remote, $domain, $publicPort, $remotePort)
+      if ($LASTEXITCODE -ne 0) { throw "服务器配置失败（见上面的输出）" }
+      Use-SshTunnel $sshHost $url $remotePort
+      Ok "已切换为 SSH 反向隧道，固定地址：$url/mcp"
+      Restart-Hint
+    }
+    default {
+      Info "  当前隧道: $(Describe-Mode (Read-Config))"
+      Info ""
+      Info "  wdb tunnel quick                              Cloudflare Quick Tunnel（默认，免配置，地址会变）"
+      Info "  wdb tunnel setup <SSH主机> <域名> [--port 8443]  用自己的服务器和域名一键配置固定地址（推荐）"
+      Info "  wdb tunnel ssh <SSH主机> <公网地址>             服务器已配好反代时，只切换到 SSH 隧道"
+      Info "  wdb tunnel none                               不建隧道，只在本机使用"
+    }
+  }
+}
 function Cmd-Update {
   $installer = Join-Path $AppDir "install.ps1"
   if (-not (Test-Path $installer)) { throw "找不到 $installer" }
@@ -364,10 +549,11 @@ function Cmd-Help {
   Info @"
 Windows Developer Bridge (wdb) — 把这台 Windows 电脑作为 MCP 工具提供给 ChatGPT / Claude 等 AI
 
-  wdb start [--local] [--port N]   一键启动 HTTP 服务 + Cloudflare 隧道，打印 MCP 地址和授权 PIN
+  wdb start [--local] [--port N]   一键启动 HTTP 服务 + 隧道，打印 MCP 地址和授权 PIN
   wdb stop                         停止服务和隧道
-  wdb restart                      重启（Quick Tunnel 地址会变）
+  wdb restart                      重启（Quick Tunnel 地址会变，固定地址不变）
   wdb status                       查看运行状态、地址、PIN
+  wdb tunnel [quick|ssh|setup|none] 查看 / 切换隧道；setup 用自己的服务器和域名配置固定地址
   wdb url | pin | token            只打印 MCP 地址 / 授权 PIN / 静态 Bearer token
   wdb unlock | lock                开启 / 关闭完全访问（命令执行与文件读写）
   wdb logs [http|tunnel] [-f]      查看日志
@@ -387,6 +573,7 @@ try {
     "stop" { Cmd-Stop }
     "restart" { Cmd-Stop; Cmd-Start }
     "status" { Cmd-Status }
+    "tunnel" { Cmd-Tunnel }
     "url" { Cmd-Url }
     "pin" { Cmd-Pin }
     "token" { Cmd-Token }

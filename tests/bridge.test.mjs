@@ -29,7 +29,7 @@ test("bridge_status reports host, shell and lock state", async t => {
   t.after(() => bridge.close());
   const status = await bridge.tool("bridge_status");
   assert.equal(status.platform, process.platform);
-  assert.equal(status.bridgeVersion, "0.2.0");
+  assert.equal(status.bridgeVersion, "0.3.0");
   assert.equal(status.fullAccessUnlocked, true);
   assert.ok(status.accessModel);
   if (IS_WIN) {

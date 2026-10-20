@@ -4,22 +4,11 @@ import crypto from "node:crypto";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
-import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createOAuthStore } from "./mcp-oauth.mjs";
+import { loadConfigEnv } from "./lib/config.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-// `wdb` 把 token/端口等写在 <数据目录>/config.env；已存在的环境变量优先
-function loadConfigEnv() {
-  const dataDir = process.env.WDB_DATA_DIR || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "WindowsDeveloperBridge") : path.join(os.homedir(), ".windows-developer-bridge"));
-  let text;
-  try { text = fs.readFileSync(path.join(dataDir, "config.env"), "utf8"); } catch { return; }
-  for (const line of text.replace(/^﻿/, "").split(/\r?\n/)) {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
-    if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2].trim();
-  }
-}
 loadConfigEnv();
 const BRIDGE = process.env.WDB_BRIDGE_ENTRY || path.join(ROOT, "bridge.mjs");
 const HOST = process.env.WDB_HTTP_HOST || "127.0.0.1";

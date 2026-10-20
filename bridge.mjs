@@ -8,7 +8,7 @@ import readline from "node:readline";
 import { spawn, spawnSync } from "node:child_process";
 import { isCodexPatch, applyCodexPatch } from "./lib/patch.mjs";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const IS_WIN = process.platform === "win32";
 const HOME = os.homedir();
 const DATA_DIR = process.env.WDB_DATA_DIR || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "WindowsDeveloperBridge") : path.join(HOME, ".windows-developer-bridge"));

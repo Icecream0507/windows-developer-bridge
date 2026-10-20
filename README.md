@@ -42,7 +42,7 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 
 完成后在对话中启用这个连接器，试着说：「用 Windows 连接器看看我 C 盘还剩多少空间」。
 
-> Quick Tunnel 的地址**每次 `wdb start` / `wdb restart` 都会变**，变了要在 ChatGPT 里把连接器 URL 改成新地址（`wdb url` 查看）。想要固定地址见[进阶](#进阶)。
+> 默认的 Quick Tunnel 地址**每次 `wdb start` / `wdb restart`（包括重启电脑后）都会变**；短暂断网会自动重连、地址不变，但**断网太久（实测约 1 小时以上）Cloudflare 会回收地址**，`wdb status` 会提示「地址已失效」，只能 `wdb restart` 换新地址。地址变了要在 ChatGPT 里把连接器 URL 改成新地址（`wdb url` 查看）。有自己的服务器和域名的话，可以配一个[永久不变的地址](#4-固定地址可选)。
 
 ## 3. 日常使用
 
@@ -65,8 +65,9 @@ wdb start
 | 命令 | 作用 |
 |---|---|
 | `wdb start` | 后台启动服务 + 隧道，打印 MCP 地址和 PIN（关掉终端也会继续运行） |
-| `wdb status` | 查看是否在运行、地址、PIN、是否锁定 |
+| `wdb status` | 查看是否在运行、隧道是否在线、地址、PIN、是否锁定 |
 | `wdb stop` / `wdb restart` | 停止 / 重启 |
+| `wdb tunnel` | 查看 / 切换隧道方式（Quick Tunnel、自己的服务器、仅本机） |
 | `wdb url` / `wdb pin` / `wdb token` | 只显示 MCP 地址 / 授权 PIN / 静态 Bearer token |
 | `wdb lock` / `wdb unlock` | 关闭 / 开启完全访问（锁定时 AI 只能查看状态） |
 | `wdb logs [http\|tunnel] [-f]` | 查看日志 |
@@ -75,7 +76,32 @@ wdb start
 | `wdb reset-auth` | 让所有已授权的客户端失效，重新生成 PIN 和 token |
 | `wdb update` / `wdb uninstall [--purge]` | 更新 / 卸载 |
 
-## 4. AI 能用的工具
+## 4. 固定地址（可选）
+
+有一台**有公网 IP 的 Linux 服务器**和一个**解析到它的域名**，就能把地址固定成 `https://你的域名:8443/mcp`：重启电脑、断网恢复后都不变，ChatGPT 里配一次就不用再改。连国内服务器也比连 Cloudflare 稳定，不需要开 TUN。
+
+```
+ChatGPT → https://你的域名:8443 → 服务器上的 nginx 容器（复用已有证书）→ SSH 反向隧道 → 你的电脑
+```
+
+**准备**：服务器能用 SSH **密钥免密码登录**（`ssh 主机` 不用输密码）、账号有 sudo、装了 Docker；域名已经用 certbot 申请过证书（`/etc/letsencrypt/live/你的域名/`）。
+
+**3 步配置**：
+
+1. 在电脑上运行（`主机` 可以是 `~/.ssh/config` 里的别名，或 `用户名@IP`）：
+   ```powershell
+   wdb tunnel setup 主机 你的域名
+   ```
+   端口默认 8443，被占用可加 `--port 9443`。它会自动在服务器上起一个 HTTPS 反代容器，不改动服务器上已有的网站。
+2. 在云服务器控制台的**安全组**放行 **TCP 8443**（腾讯云 / 阿里云：实例 → 安全组 → 入站规则 → 添加）。
+3. `wdb restart`，把显示的 `https://你的域名:8443/mcp` 填到 ChatGPT 连接器里。
+
+之后断网、睡眠唤醒都会在约 1 分钟内自动重连；重启电脑后 `wdb start` 即可，地址不变。想换回默认方式：`wdb tunnel quick`。
+
+> 服务器上做的改动：容器 `wdb-proxy-8443`（配置在 `/etc/wdb-proxy/`）、证书续期后自动重载的钩子、以及给 sshd 开启断线检测（`/etc/ssh/sshd_config.d/00-wdb-tunnel.conf`，45 秒清理掉线的会话，避免旧连接占着隧道端口）。
+> 注意 HTTPS 在服务器上解密，**服务器的 root 用户理论上能看到流量**，只用你信任的服务器。
+
+## 5. AI 能用的工具
 
 | 类别 | 工具 | 说明 |
 |---|---|---|
@@ -89,7 +115,7 @@ wdb start
 
 详细参数见 [工具参考](skills/windows-developer-bridge/references/tools.md)，与原版 Mac Developer Bridge 的对照见[兼容矩阵](docs/compatibility-matrix.md)。
 
-## 5. 作为 Skill 使用
+## 6. 作为 Skill 使用
 
 仓库里的 [`skills/windows-developer-bridge`](skills/windows-developer-bridge/SKILL.md) 是一个 Agent Skill：教 AI 如何安装、启动、连接、排错 WDB，以及怎样用好这些工具。
 
@@ -97,7 +123,7 @@ wdb start
 - **手动安装 / 其他平台**：从 [Releases](https://github.com/Icecream0507/windows-developer-bridge/releases) 下载 `windows-developer-bridge-skill.zip`，解压到 `~/.claude/skills/` 或 `~/.codex/skills/`；claude.ai 可在 设置 → Capabilities → Skills 上传这个 zip。
 - 自己打包：`powershell -File scripts\package-skill.ps1` → `dist\windows-developer-bridge-skill.zip`。
 
-## 6. 安全须知
+## 7. 安全须知
 
 - 开启完全访问后，AI 以**你当前 Windows 用户的权限**执行命令和改文件，**没有沙箱**。
 - 隧道地址是公网可访问的；连接必须通过 OAuth + 本机 PIN（或静态 token）。**PIN / token 不要发给任何人。**
@@ -106,12 +132,13 @@ wdb start
 
 更多见 [SECURITY.md](SECURITY.md)。
 
-## 7. 常见问题
+## 8. 常见问题
 
 | 现象 | 解决 |
 |---|---|
 | 工具返回 `FULL_ACCESS_LOCKED` | 运行 `wdb unlock` |
-| ChatGPT 提示无法连接 / 404 / 530 | `wdb status` 看隧道是否在线；地址变了就 `wdb restart` 并更新连接器 URL（要带 `/mcp`） |
+| ChatGPT 提示无法连接 / 404 / 530 | `wdb status` 看隧道是否在线；提示「地址已失效」或地址变了，就 `wdb restart` 并更新连接器 URL（要带 `/mcp`） |
+| 固定地址访问不了 | `wdb doctor`：HTTP 0 = 安全组没放行端口或服务器反代没运行（重新 `wdb tunnel setup`）；503 = 隧道没接上（`wdb logs tunnel` 看原因）。断网刚恢复时出现 `remote port forwarding failed` 属正常，约 1 分钟内自动恢复 |
 | 隧道一直连不上 | `wdb doctor` 看能否直连 Cloudflare；连不上就打开代理软件的 **TUN / 虚拟网卡模式**（cloudflared 不走系统代理），然后 `wdb restart`；`wdb logs tunnel` 看原因 |
 | 授权页提示 PIN 错误 | 用电脑上 `wdb pin` 显示的 9 位数字；连续错 5 次需重新发起授权 |
 | `wdb` 不是命令 | 新开一个终端；或直接运行 `%LOCALAPPDATA%\WindowsDeveloperBridge\bin\wdb.cmd` |
@@ -127,8 +154,11 @@ wdb start
 | `WDB_HTTP_PORT` | 本地端口，默认 `8787` |
 | `WDB_HTTP_TOKEN` | 静态 Bearer token（自动生成，`wdb token` 查看） |
 | `WDB_PROXY` | 下载 cloudflared 时使用的代理，如 `http://127.0.0.1:7897`；`off` 表示不用 |
-| `WDB_TUNNEL` | 设为 `none` 则只在本机提供服务 |
-| `CLOUDFLARE_TUNNEL_TOKEN` + `WDB_HTTP_PUBLIC_URL` | 使用自己的 Cloudflare 命名隧道和固定域名（例如 `https://pc.example.com`），地址不再变化 |
+| `WDB_TUNNEL` | `quick`（默认）/ `ssh`（自己的服务器）/ `none`（只在本机）；用 `wdb tunnel` 切换 |
+| `WDB_SSH_HOST` / `WDB_SSH_REMOTE_PORT` | ssh 模式的服务器（SSH 别名或 `用户@IP`）和服务器上的隧道端口（默认 `18787`） |
+| `WDB_HTTP_PUBLIC_URL` | 固定的公网地址（ssh 模式或 Cloudflare 命名隧道），例如 `https://pc.example.com:8443` |
+| `CLOUDFLARE_TUNNEL_TOKEN` | 使用自己的 Cloudflare 命名隧道（配合 `WDB_HTTP_PUBLIC_URL`），地址不再变化 |
+| `WDB_SSH_BIN` | 指定 ssh.exe（默认用 Windows 自带的 OpenSSH） |
 | `WDB_POWERSHELL` | 指定 PowerShell 可执行文件 |
 | `CODEX_BIN` | 指定 Codex CLI |
 

@@ -23,19 +23,27 @@ If `wdb` is not recognised right after installing, open a new terminal or call `
 
 | Command | Effect |
 |---|---|
-| `wdb start` | Start the HTTP MCP service and a Cloudflare Quick Tunnel in the background; prints the MCP URL (also copied to the clipboard) and the consent PIN. `--local` skips the tunnel, `--port N` changes the port. |
-| `wdb status` | Health, URL, PIN, lock state. |
-| `wdb stop` / `wdb restart` | Stop / restart service and tunnel (a Quick Tunnel gets a new URL on every start). |
+| `wdb start` | Start the HTTP MCP service and the configured tunnel in the background; prints the MCP URL (also copied to the clipboard) and the consent PIN. `--local` skips the tunnel, `--port N` changes the port. |
+| `wdb status` | Health, tunnel mode, URL, PIN, lock state; flags a tunnel that is reconnecting or a Quick Tunnel URL that Cloudflare has recycled. |
+| `wdb stop` / `wdb restart` | Stop / restart service and tunnel (a Quick Tunnel gets a new URL on every start; a fixed URL stays). |
+| `wdb tunnel [quick\|setup\|ssh\|none]` | Show or switch the tunnel. `wdb tunnel setup <ssh-host> <domain> [--port 8443]` gives a permanent URL through the user's own server (see below). |
 | `wdb url`, `wdb pin`, `wdb token` | Print just the MCP URL, the PIN, or the static bearer token. |
 | `wdb unlock` / `wdb lock` | Enable / disable command and file tools (`bridge_status` always works). Locking also kills running jobs and terminals. |
 | `wdb logs [http\|tunnel] [-f]` | Show service or tunnel logs. |
-| `wdb doctor` | Check Node, PowerShell, Git, Codex, ConPTY, cloudflared and whether Cloudflare is directly reachable. |
+| `wdb doctor` | Check Node, PowerShell, Git, Codex, ConPTY and the tunnel: Cloudflare reachability, or SSH key login + public URL in ssh mode. |
 | `wdb mcp-config` | Print stdio config for Claude Code, Codex, Claude Desktop, Cursor. |
 | `wdb reset-auth` | Revoke every OAuth client/token and generate a new PIN and token. |
 
 ## Connect a client
 
-**ChatGPT** (needs developer mode for custom connectors): Settings → Apps & Connectors → Advanced → enable Developer mode → Create connector. URL = the `https://…trycloudflare.com/mcp` address from `wdb start`, authentication = OAuth. A consent page opens; the user types the PIN shown by `wdb start` / `wdb pin` and approves. When the tunnel URL changes, edit the connector URL.
+**ChatGPT** (needs developer mode for custom connectors): Settings → Apps & Connectors → Advanced → enable Developer mode → Create connector. URL = the `https://…/mcp` address from `wdb start`, authentication = OAuth. A consent page opens; the user types the PIN shown by `wdb start` / `wdb pin` and approves. When the tunnel URL changes, edit the connector URL.
+
+## Tunnels and when the URL changes
+
+- **Quick Tunnel** (default, zero config): new `*.trycloudflare.com` URL on every `wdb start`/`restart` and after a reboot. Short network drops reconnect with the same URL, but if the PC stays offline for a long time (observed: ~80 min) Cloudflare deletes the tunnel; the log shows `Tunnel not found`, `wdb status` reports the URL as expired, and only `wdb restart` (new URL) fixes it.
+- **Own server, fixed URL** (`ssh` mode): needs a Linux server with key-based SSH login, sudo, Docker, and a domain pointing at it with a Let's Encrypt certificate in `/etc/letsencrypt/live/<domain>/`. `wdb tunnel setup <ssh-host> <domain> [--port 8443]` uploads `scripts/server/setup-wdb-proxy.sh`, which starts an `nginx:alpine` container `wdb-proxy-<port>` (host network, `https://<domain>:<port>` → `127.0.0.1:18787`), adds a certbot deploy hook, and enables sshd `ClientAliveInterval 15` so dead sessions release the port. It never touches existing sites. Then open TCP `<port>` in the cloud security group and `wdb restart`. `lib/ssh-tunnel.mjs` keeps `ssh -R 127.0.0.1:18787:127.0.0.1:8787` alive and reconnects after drops/sleep (≈1 min worst case). TLS terminates on that server, so its root users can see traffic.
+- **Named Cloudflare tunnel**: `CLOUDFLARE_TUNNEL_TOKEN=...` + `WDB_HTTP_PUBLIC_URL=https://your.host` in `config.env`.
+- **None**: `wdb tunnel none` or `wdb start --local`.
 
 **Clients with custom headers**: same URL with header `Authorization: Bearer <wdb token>`.
 
@@ -71,12 +79,13 @@ Call `bridge_status` first: it reports the host, which PowerShell is used (`pwsh
 | Symptom | Fix |
 |---|---|
 | Tool returns `FULL_ACCESS_LOCKED` | User runs `wdb unlock` (deliberate opt-in). |
-| ChatGPT says the server is unreachable / 404 / 530 | `wdb status`; if the tunnel died or the URL changed, `wdb restart` and update the connector URL (must end in `/mcp`). |
+| ChatGPT says the server is unreachable / 404 / 530 | `wdb status`; if the tunnel died, the Quick Tunnel URL expired or the URL changed, `wdb restart` and update the connector URL (must end in `/mcp`). |
+| ssh mode: `wdb doctor` says the public URL is unreachable | HTTP 0 = security group / firewall does not allow the port, or the `wdb-proxy-<port>` container is down (`wdb tunnel setup` again); 503 = proxy is up but the tunnel is not connected (`wdb logs tunnel`). `remote port forwarding failed` right after a network drop is expected for up to ~1 min. |
 | Tunnel never connects | cloudflared always connects directly (it ignores HTTPS_PROXY and the system proxy). Run `wdb doctor`; if `api.trycloudflare.com:443` or `region1.v2.argotunnel.com:7844` is unreachable, enable the proxy app's TUN / virtual-adapter mode (Clash Verge, v2rayN), then `wdb restart`. Check `wdb logs tunnel`. |
 | OAuth page rejects the PIN | Use the PIN from `wdb pin` on the PC; 5 wrong tries void the request, 30 failures in 10 min lock briefly. |
 | Client keeps getting 401 after `wdb reset-auth` | Remove and re-add the connector so it registers again. |
 | `Port 8787 is in use` | `wdb start --port 8788`. |
-| Want a URL that never changes | Create a named Cloudflare tunnel, then put `CLOUDFLARE_TUNNEL_TOKEN=...` and `WDB_HTTP_PUBLIC_URL=https://your.host` in `config.env`, `wdb restart`. |
+| Want a URL that never changes | Own server: `wdb tunnel setup <ssh-host> <domain>`, open the port, `wdb restart`. Or a named Cloudflare tunnel (see above). |
 
 ## Safety
 
