@@ -1,6 +1,6 @@
 ---
 name: windows-developer-bridge
-description: Install, start, connect and troubleshoot Windows Developer Bridge (WDB), an MCP server that exposes this Windows PC (PowerShell, files, background jobs, real ConPTY terminals, patches, Codex history) to ChatGPT, Claude and other MCP clients through an authenticated Cloudflare tunnel; also how to use its tools well. Use when the user wants ChatGPT/Claude to access or control their Windows computer, asks to set up, start, stop, restart or fix WDB / the `wdb` command, needs the MCP URL, consent PIN or token, or is calling WDB tools (shell_exec, fs_*, pty_*, apply_patch). 触发：让 ChatGPT 远程操作我的 Windows 电脑、MCP 桥接、wdb 启动/连接/报错。
+description: Install, start, connect and troubleshoot Windows Developer Bridge (WDB), an MCP server that exposes this Windows PC (PowerShell, files, background jobs, real ConPTY terminals, patches, Codex history) to ChatGPT, Claude and other MCP clients through an authenticated tunnel (Cloudflare, or a permanent URL via the user's own server); also how to use its tools well. Use when the user wants ChatGPT/Claude to access or control their Windows computer, asks to set up, start, stop, restart or fix WDB / the `wdb` command, needs the MCP URL, consent PIN or token, or is calling WDB tools (shell_exec, fs_*, pty_*, apply_patch). 触发：让 ChatGPT 远程操作我的 Windows 电脑、MCP 桥接、wdb 启动/连接/报错。
 ---
 
 # Windows Developer Bridge (WDB)
