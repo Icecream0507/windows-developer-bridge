@@ -140,10 +140,16 @@ function Get-PublicUrl($state) {
   if ($state.publicUrl) { return $state.publicUrl }
   return $null
 }
-function Read-TunnelUrl([string]$log) {
-  if (-not (Test-Path $log)) { return $null }
-  $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
-  if ($text -and $text -match 'https://[a-z0-9-]+\.trycloudflare\.com') { return $Matches[0] }
+# 只读取本次尝试写入的日志（$offset 之后），并排除错误信息里的 api.trycloudflare.com
+function Read-LogSince([string]$log, [long]$offset) {
+  if (-not (Test-Path $log)) { return "" }
+  try {
+    $fs = [IO.File]::Open($log, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try { [void]$fs.Seek($offset, [IO.SeekOrigin]::Begin); return (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Close() }
+  } catch { return "" }
+}
+function Read-TunnelUrl([string]$text) {
+  if ($text -match 'https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com') { return $Matches[0] }
   return $null
 }
 function Show-Connection($state) {
@@ -207,12 +213,16 @@ function Cmd-Start {
     $cloudflared = Get-Cloudflared
     if (-not $cloudflared) { $cloudflared = Install-Cloudflared $proxy }
     $named = [bool]$cfg["CLOUDFLARE_TUNNEL_TOKEN"]
+    # 先走代理（失败重试一次，Quick Tunnel 接口偶尔超时），最后再试直连
     $attempts = @()
-    if ($proxy) { $attempts += ,$proxy }
+    if ($proxy) { $attempts += ,$proxy; $attempts += ,$proxy }
     $attempts += ,""
+    $n = 0
     foreach ($attempt in $attempts) {
+      $n++
       $envPrefix = ""
-      if ($attempt) { $envPrefix = "set `"HTTPS_PROXY=$attempt`"&& set `"HTTP_PROXY=$attempt`"&& "; Info "  通过代理 $attempt 连接 Cloudflare（可用 config.env 里 WDB_PROXY=off 关闭）" } else { if ($proxy) { Warn "代理连接失败，改为直连重试" } }
+      if ($attempt) { $envPrefix = "set `"HTTPS_PROXY=$attempt`"&& set `"HTTP_PROXY=$attempt`"&& "; Info "  [$n/$($attempts.Count)] 通过代理 $attempt 连接 Cloudflare（config.env 里 WDB_PROXY=off 可关闭）" }
+      else { Info "  [$n/$($attempts.Count)] 直连 Cloudflare" }
       if ($named) {
         $tokenFile = Join-Path $RunDir "tunnel.token"
         [IO.File]::WriteAllText($tokenFile, $cfg["CLOUDFLARE_TUNNEL_TOKEN"])
@@ -220,17 +230,22 @@ function Cmd-Start {
       } else {
         $tunnelArgs = "tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:$port"
       }
-      Remove-Item $tunnelLog -Force -ErrorAction SilentlyContinue
+      $offset = if (Test-Path $tunnelLog) { (Get-Item $tunnelLog).Length } else { 0 }
       $tunnelPid = Start-Detached "cmd.exe /d /s /c `"$envPrefix`"$cloudflared`" $tunnelArgs 1>>`"$tunnelLog`" 2>&1`"" $AppDir
       $url = $null
-      $deadline = (Get-Date).AddSeconds(45)
+      $deadline = (Get-Date).AddSeconds(50)
       while ((Get-Date) -lt $deadline -and (Test-Pid $tunnelPid)) {
-        if ($named) { if ((Test-Path $tunnelLog) -and (Select-String -Path $tunnelLog -Pattern "Registered tunnel connection" -Quiet)) { $url = $cfg["WDB_HTTP_PUBLIC_URL"]; break } }
-        else { $url = Read-TunnelUrl $tunnelLog; if ($url -and (Select-String -Path $tunnelLog -Pattern "Registered tunnel connection" -Quiet)) { break } }
+        $text = Read-LogSince $tunnelLog $offset
+        if ($text -match "Registered tunnel connection") {
+          $url = if ($named) { $cfg["WDB_HTTP_PUBLIC_URL"] } else { Read-TunnelUrl $text }
+          if ($url) { break }
+        }
         Start-Sleep -Milliseconds 500
       }
       if ($url) { $state.tunnelPid = $tunnelPid; $state.publicUrl = $url.TrimEnd("/"); $state.tunnel = $(if ($named) { "named" } else { "quick" }); break }
       Stop-Tree $tunnelPid
+      $reason = ((Read-LogSince $tunnelLog $offset) -split "`n" | Where-Object { $_ -match "ERR|failed" } | Select-Object -Last 1)
+      if ($reason) { Warn "未连上：$($reason.Trim())" }
     }
     if ($state.publicUrl) { Ok "隧道已连接：$($state.publicUrl)" }
     else { Warn "隧道没有连上（日志：$tunnelLog）。本机仍可用 http://127.0.0.1:$port/mcp。检查网络/代理后运行 wdb restart。" }

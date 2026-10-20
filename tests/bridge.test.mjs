@@ -159,7 +159,8 @@ test("apply_patch applies unified diffs with git relative to cwd", { skip: !hasG
   const diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+2\n";
   const result = await bridge.tool("apply_patch", { patch: diff, cwd: path.join(dir, "pkg") });
   assert.equal(result.format, "unified");
-  assert.equal(fs.readFileSync(path.join(dir, "pkg", "a.txt"), "utf8"), "one\n2\n");
+  // git may write CRLF when core.autocrlf=true (the default on GitHub Windows runners)
+  assert.equal(fs.readFileSync(path.join(dir, "pkg", "a.txt"), "utf8").replace(/\r\n/g, "\n"), "one\n2\n");
   const failed = await bridge.call("apply_patch", { patch: diff, cwd: path.join(dir, "pkg") });
   assert.equal(failed.structuredContent.code, "PATCH_FAILED");
 });
@@ -242,7 +243,8 @@ test("PowerShell: UTF-8 output, stdin and exit codes", { skip: !IS_WIN }, async 
   assert.equal(thrown.exitCode, 1);
   assert.match(thrown.stderr, /boom/);
   const cwd = await bridge.tool("shell_exec", { command: "(Get-Location).Path", cwd: os.tmpdir() });
-  assert.equal(cwd.stdout.trim().toLowerCase(), path.resolve(os.tmpdir()).toLowerCase());
+  // os.tmpdir() can be an 8.3 short path (C:\Users\RUNNER~1); compare long forms
+  assert.equal(fs.realpathSync.native(cwd.stdout.trim()).toLowerCase(), fs.realpathSync.native(os.tmpdir()).toLowerCase());
   const env = await bridge.tool("shell_exec", { command: "Write-Output $env:WDB_TEST_VAR", env: { WDB_TEST_VAR: "env-ok" } });
   assert.equal(env.stdout.trim(), "env-ok");
   const badCwd = await bridge.call("shell_exec", { command: "Write-Output x", cwd: path.join(os.tmpdir(), "definitely-missing-" + Date.now()) });
