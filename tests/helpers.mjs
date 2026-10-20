@@ -49,7 +49,9 @@ export async function startBridge({ unlocked = true, env = {}, dataDir } = {}) {
       child.stdin.end();
       await Promise.race([new Promise(resolve => child.once("exit", resolve)), new Promise(resolve => setTimeout(resolve, 3000))]);
       if (child.exitCode === null) child.kill();
-      if (ownsDataDir) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      // Antivirus on CI runners can hold freshly written job logs for a while; temp cleanup
+      // failures are not what these tests verify.
+      if (ownsDataDir) try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 }); } catch (error) { process.stderr.write("warning: could not remove " + dir + ": " + error.message + "\n"); }
     },
   };
 }

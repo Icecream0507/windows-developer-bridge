@@ -5,7 +5,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import crypto from "node:crypto";
 import readline from "node:readline";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { isCodexPatch, applyCodexPatch } from "./lib/patch.mjs";
 
 const VERSION = "0.2.0";
@@ -237,14 +237,25 @@ function boundedCapture(maxBytes) {
     },
   };
 }
+// Console tools such as taskkill print in the OEM code page (e.g. 936/GBK on Chinese Windows).
+let oemDecoder = null;
+function decodeOem(buffer) {
+  if (!oemDecoder) {
+    const names = { 936: "gbk", 950: "big5", 932: "shift_jis", 949: "euc-kr", 866: "ibm866", 65001: "utf-8" };
+    let page = null;
+    if (IS_WIN) { try { page = Number((spawnSync("cmd.exe", ["/d", "/c", "chcp"], { encoding: "latin1", windowsHide: true }).stdout.match(/(\d+)\s*$/) || [])[1]); } catch {} }
+    try { oemDecoder = new TextDecoder(names[page] || "utf-8"); } catch { oemDecoder = new TextDecoder("utf-8"); }
+  }
+  return oemDecoder.decode(buffer);
+}
 function killTree(pid) {
   return new Promise(resolve => {
     if (!pid) return resolve({ code: null, stdout: "", stderr: "no pid" });
     const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
-    killer.stdout.on("data", chunk => stdout += chunk); killer.stderr.on("data", chunk => stderr += chunk);
-    killer.once("error", error => resolve({ code: null, stdout: stdout, stderr: error.message }));
-    killer.once("close", code => resolve({ code: code, stdout: stdout.trim(), stderr: stderr.trim() }));
+    const stdout = [], stderr = [];
+    killer.stdout.on("data", chunk => stdout.push(chunk)); killer.stderr.on("data", chunk => stderr.push(chunk));
+    killer.once("error", error => resolve({ code: null, stdout: "", stderr: error.message }));
+    killer.once("close", code => resolve({ code: code, stdout: decodeOem(Buffer.concat(stdout)).trim(), stderr: decodeOem(Buffer.concat(stderr)).trim() }));
   });
 }
 function pidAlive(pid) {
