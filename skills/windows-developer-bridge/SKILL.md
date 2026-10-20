@@ -29,7 +29,7 @@ If `wdb` is not recognised right after installing, open a new terminal or call `
 | `wdb url`, `wdb pin`, `wdb token` | Print just the MCP URL, the PIN, or the static bearer token. |
 | `wdb unlock` / `wdb lock` | Enable / disable command and file tools (`bridge_status` always works). Locking also kills running jobs and terminals. |
 | `wdb logs [http\|tunnel] [-f]` | Show service or tunnel logs. |
-| `wdb doctor` | Check Node, PowerShell, Git, Codex, ConPTY, cloudflared, proxy. |
+| `wdb doctor` | Check Node, PowerShell, Git, Codex, ConPTY, cloudflared and whether Cloudflare is directly reachable. |
 | `wdb mcp-config` | Print stdio config for Claude Code, Codex, Claude Desktop, Cursor. |
 | `wdb reset-auth` | Revoke every OAuth client/token and generate a new PIN and token. |
 
@@ -72,7 +72,7 @@ Call `bridge_status` first: it reports the host, which PowerShell is used (`pwsh
 |---|---|
 | Tool returns `FULL_ACCESS_LOCKED` | User runs `wdb unlock` (deliberate opt-in). |
 | ChatGPT says the server is unreachable / 404 / 530 | `wdb status`; if the tunnel died or the URL changed, `wdb restart` and update the connector URL (must end in `/mcp`). |
-| Tunnel never connects | Network blocks Cloudflare: start a local proxy (Clash/v2rayN; ports 7897/7890/10809 are auto-detected) or set `WDB_PROXY=http://127.0.0.1:PORT` in `%LOCALAPPDATA%\WindowsDeveloperBridge\config.env`, then `wdb restart`. Check `wdb logs tunnel`. |
+| Tunnel never connects | cloudflared always connects directly (it ignores HTTPS_PROXY and the system proxy). Run `wdb doctor`; if `api.trycloudflare.com:443` or `region1.v2.argotunnel.com:7844` is unreachable, enable the proxy app's TUN / virtual-adapter mode (Clash Verge, v2rayN), then `wdb restart`. Check `wdb logs tunnel`. |
 | OAuth page rejects the PIN | Use the PIN from `wdb pin` on the PC; 5 wrong tries void the request, 30 failures in 10 min lock briefly. |
 | Client keeps getting 401 after `wdb reset-auth` | Remove and re-add the connector so it registers again. |
 | `Port 8787 is in use` | `wdb start --port 8788`. |

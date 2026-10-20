@@ -206,23 +206,20 @@ function Cmd-Start {
   }
   Ok "HTTP 服务已启动"
 
-  $state = [ordered]@{ httpPid = $httpPid; tunnelPid = $null; port = $port; publicUrl = $null; tunnel = "none"; startedAt = (Get-Date).ToString("o"); appDir = $AppDir }
+  $state = [ordered]@{ httpPid = $httpPid; tunnelPid = $null; port = $port; publicUrl = $null; tunnel = $(if ($local) { "none" } else { "failed" }); startedAt = (Get-Date).ToString("o"); appDir = $AppDir }
   if (-not $local) {
     Title "启动 Cloudflare 隧道"
     $proxy = Find-Proxy $cfg
     $cloudflared = Get-Cloudflared
     if (-not $cloudflared) { $cloudflared = Install-Cloudflared $proxy }
     $named = [bool]$cfg["CLOUDFLARE_TUNNEL_TOKEN"]
-    # 先走代理（失败重试一次，Quick Tunnel 接口偶尔超时），最后再试直连
-    $attempts = @()
-    if ($proxy) { $attempts += ,$proxy; $attempts += ,$proxy }
-    $attempts += ,""
-    $n = 0
-    foreach ($attempt in $attempts) {
-      $n++
-      $envPrefix = ""
-      if ($attempt) { $envPrefix = "set `"HTTPS_PROXY=$attempt`"&& set `"HTTP_PROXY=$attempt`"&& "; Info "  [$n/$($attempts.Count)] 通过代理 $attempt 连接 Cloudflare（config.env 里 WDB_PROXY=off 可关闭）" }
-      else { Info "  [$n/$($attempts.Count)] 直连 Cloudflare" }
+    # cloudflared 申请 Quick Tunnel 和连接边缘节点都是直连（实测不读取 HTTPS_PROXY），
+    # 代理变量只为将来版本保留；网络受限时需要代理软件的 TUN/虚拟网卡模式。接口偶尔超时，重试 3 次。
+    $envPrefix = ""
+    if ($proxy) { $envPrefix = "set `"HTTPS_PROXY=$proxy`"&& set `"HTTP_PROXY=$proxy`"&& " }
+    $attempts = 1..3
+    foreach ($n in $attempts) {
+      Info "  [$n/$($attempts.Count)] 正在连接 Cloudflare…"
       if ($named) {
         $tokenFile = Join-Path $RunDir "tunnel.token"
         [IO.File]::WriteAllText($tokenFile, $cfg["CLOUDFLARE_TUNNEL_TOKEN"])
@@ -248,7 +245,10 @@ function Cmd-Start {
       if ($reason) { Warn "未连上：$($reason.Trim())" }
     }
     if ($state.publicUrl) { Ok "隧道已连接：$($state.publicUrl)" }
-    else { Warn "隧道没有连上（日志：$tunnelLog）。本机仍可用 http://127.0.0.1:$port/mcp。检查网络/代理后运行 wdb restart。" }
+    else {
+      Warn "隧道没有连上（日志：$tunnelLog）。本机仍可用 http://127.0.0.1:$port/mcp。"
+      Warn "cloudflared 需要能直接访问 Cloudflare：国内网络请打开代理软件的 TUN / 虚拟网卡模式（普通系统代理无效），然后 wdb restart。"
+    }
   }
   Write-State $state
   Show-Connection $state
@@ -273,6 +273,7 @@ function Cmd-Status {
   if ($state -and $state.publicUrl) {
     if (Test-Pid $state.tunnelPid) { Ok "隧道运行中: $($state.publicUrl)/mcp" } else { Bad "隧道已退出（wdb restart 重新连接）" }
   } elseif ($state -and $state.tunnel -eq "none") { Info "  隧道: 未启用（本机模式）" }
+  elseif ($state -and $state.tunnel -eq "failed") { Bad "隧道未连接（wdb doctor 检查网络，wdb restart 重试）" }
   if (Test-Path $UnlockFile) { Ok "完全访问已开启" } else { Warn "完全访问已锁定（wdb unlock 开启）" }
   if (Test-Path $PinFile) { Info "  授权 PIN: $((Get-Content $PinFile -Raw).Trim())" }
 }
@@ -298,7 +299,14 @@ function Cmd-Doctor {
   $cf = Get-Cloudflared
   if ($cf) { Ok "cloudflared: $cf" } else { Warn "未找到 cloudflared（wdb start 会自动下载）" }
   $proxy = Find-Proxy (Read-Config)
-  if ($proxy) { Info "  [i]  检测到本地代理 $proxy（隧道会优先通过它连接）" }
+  if ($proxy) { Info "  [i]  检测到本地代理 $proxy（用于下载 cloudflared）" }
+  # cloudflared 直连：api.trycloudflare.com:443 申请隧道，边缘节点 7844 端口承载连接
+  foreach ($target in @(@("api.trycloudflare.com", 443), @("region1.v2.argotunnel.com", 7844))) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    $reachable = $false
+    try { $ar = $client.BeginConnect($target[0], $target[1], $null, $null); $reachable = $ar.AsyncWaitHandle.WaitOne(5000) -and $client.Connected } catch {} finally { $client.Close() }
+    if ($reachable) { Ok "可直连 $($target[0]):$($target[1])" } else { Warn "无法直连 $($target[0]):$($target[1])：隧道可能连不上，国内网络请开启代理软件的 TUN / 虚拟网卡模式" }
+  }
   if (Test-Path $UnlockFile) { Ok "完全访问已开启" } else { Warn "完全访问已锁定（wdb unlock）" }
   Cmd-Status
 }

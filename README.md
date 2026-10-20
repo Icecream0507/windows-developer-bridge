@@ -28,7 +28,7 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 
 > **访问不了 GitHub？** 先打开代理软件的「系统代理」，或者指定代理运行：
 > `irm https://raw.githubusercontent.com/Icecream0507/windows-developer-bridge/main/install.ps1 -Proxy http://127.0.0.1:7897 | iex`
-> 隧道会自动使用本机常见代理端口（7897 / 7890 / 10809 / 10808 / 1080）。
+> 安装时下载 Node/cloudflared 会自动使用本机常见代理端口（7897 / 7890 / 10809）。**隧道（cloudflared）只能直连 Cloudflare**，如果你的网络连不上，请打开代理软件的 **TUN / 虚拟网卡模式**（普通「系统代理」对它无效），可用 `wdb doctor` 检查。
 
 安装脚本做了这些事：检查/安装 Node.js LTS → 下载程序到 `%LOCALAPPDATA%\WindowsDeveloperBridge\app` → 下载 cloudflared → 注册 `wdb` 命令 → 给 Claude Code / Codex 安装 Skill → 开启完全访问 → 执行 `wdb start`。
 
@@ -96,7 +96,7 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 |---|---|
 | 工具返回 `FULL_ACCESS_LOCKED` | 运行 `wdb unlock` |
 | ChatGPT 提示无法连接 / 404 / 530 | `wdb status` 看隧道是否在线；地址变了就 `wdb restart` 并更新连接器 URL（要带 `/mcp`） |
-| 隧道一直连不上 | 打开代理软件（自动识别 7897/7890/10809 等端口），或在 `config.env` 写 `WDB_PROXY=http://127.0.0.1:端口`，然后 `wdb restart`；`wdb logs tunnel` 看原因 |
+| 隧道一直连不上 | `wdb doctor` 看能否直连 Cloudflare；连不上就打开代理软件的 **TUN / 虚拟网卡模式**（cloudflared 不走系统代理），然后 `wdb restart`；`wdb logs tunnel` 看原因 |
 | 授权页提示 PIN 错误 | 用电脑上 `wdb pin` 显示的 9 位数字；连续错 5 次需重新发起授权 |
 | `wdb` 不是命令 | 新开一个终端；或直接运行 `%LOCALAPPDATA%\WindowsDeveloperBridge\bin\wdb.cmd` |
 | 端口 8787 被占用 | `wdb start --port 8788` |
@@ -110,7 +110,7 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 |---|---|
 | `WDB_HTTP_PORT` | 本地端口，默认 `8787` |
 | `WDB_HTTP_TOKEN` | 静态 Bearer token（自动生成，`wdb token` 查看） |
-| `WDB_PROXY` | 隧道使用的代理，如 `http://127.0.0.1:7897`；`off` 表示直连 |
+| `WDB_PROXY` | 下载 cloudflared 时使用的代理，如 `http://127.0.0.1:7897`；`off` 表示不用 |
 | `WDB_TUNNEL` | 设为 `none` 则只在本机提供服务 |
 | `CLOUDFLARE_TUNNEL_TOKEN` + `WDB_HTTP_PUBLIC_URL` | 使用自己的 Cloudflare 命名隧道和固定域名（例如 `https://pc.example.com`），地址不再变化 |
 | `WDB_POWERSHELL` | 指定 PowerShell 可执行文件 |
