@@ -2,147 +2,131 @@
 
 [![Windows CI](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml) [![MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Windows-first compatibility port of Mac Developer Bridge. **Early implementation; not production-ready or a complete MDB mirror.** The HTTP adapter is new and needs Windows end-to-end validation.
+把你的 Windows 电脑变成一个 **MCP 服务器**：ChatGPT、Claude 等 AI 可以远程在这台电脑上执行 PowerShell、读写文件、跑后台任务、操作交互式终端、打补丁改代码。
 
-## Requirements
+- 零依赖：只需要 Node.js 20+（安装脚本会自动装）
+- 一条命令安装，自动建立 Cloudflare 隧道，无需公网 IP / 路由器设置
+- OAuth 2.1 + 本机 PIN 授权：只有坐在这台电脑前的人才能批准连接
+- 支持 Windows PowerShell 5.1 与 PowerShell 7，中文输出不乱码
 
-- Windows 10/11
-- Node.js 20+ (LTS recommended)
-- Git for Windows
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
-- PowerShell 7 recommended for shell tools
+---
 
-## 1. Clone
+## 1. 一键安装
 
-Open PowerShell:
+在 **PowerShell** 里运行（不需要管理员）：
+
+```powershell
+irm https://raw.githubusercontent.com/Icecream0507/windows-developer-bridge/main/install.ps1 | iex
+```
+
+安装完成后会自动启动，并显示：
+
+```
+MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com/mcp   ← 已复制到剪贴板
+授权 PIN（只在本机看，别发给别人）: 123456789
+```
+
+> **访问不了 GitHub？** 先打开代理软件的「系统代理」，或者指定代理运行：
+> `irm https://raw.githubusercontent.com/Icecream0507/windows-developer-bridge/main/install.ps1 -Proxy http://127.0.0.1:7897 | iex`
+> 隧道会自动使用本机常见代理端口（7897 / 7890 / 10809 / 10808 / 1080）。
+
+安装脚本做了这些事：检查/安装 Node.js LTS → 下载程序到 `%LOCALAPPDATA%\WindowsDeveloperBridge\app` → 下载 cloudflared → 注册 `wdb` 命令 → 给 Claude Code / Codex 安装 Skill → 开启完全访问 → 执行 `wdb start`。
+
+不想自动启动或想先保持锁定：运行前设置 `$env:WDB_NO_START=1` 或 `$env:WDB_LOCKED=1`。
+
+## 2. 连接 ChatGPT（3 步）
+
+1. ChatGPT → **设置 → 应用 / Apps & Connectors → 高级设置**，打开 **开发者模式**（Developer mode）。
+2. 点 **创建 / 添加连接器**：名称随意（如 `Windows`），**MCP 服务器 URL** 粘贴上面的地址（以 `/mcp` 结尾），**认证方式选 OAuth**。
+3. 浏览器弹出授权页 → 输入电脑上显示的 **PIN** → **批准授权**。
+
+完成后在对话中启用这个连接器，试着说：「用 Windows 连接器看看我 C 盘还剩多少空间」。
+
+> Quick Tunnel 的地址**每次 `wdb start` / `wdb restart` 都会变**，变了要在 ChatGPT 里把连接器 URL 改成新地址（`wdb url` 查看）。想要固定地址见[进阶](#进阶)。
+
+## 3. 日常使用
+
+| 命令 | 作用 |
+|---|---|
+| `wdb start` | 后台启动服务 + 隧道，打印 MCP 地址和 PIN（关掉终端也会继续运行） |
+| `wdb status` | 查看是否在运行、地址、PIN、是否锁定 |
+| `wdb stop` / `wdb restart` | 停止 / 重启 |
+| `wdb url` / `wdb pin` / `wdb token` | 只显示 MCP 地址 / 授权 PIN / 静态 Bearer token |
+| `wdb lock` / `wdb unlock` | 关闭 / 开启完全访问（锁定时 AI 只能查看状态） |
+| `wdb logs [http\|tunnel] [-f]` | 查看日志 |
+| `wdb doctor` | 检查运行环境 |
+| `wdb mcp-config` | 打印本机 Claude Code / Codex / Cursor 的接入配置 |
+| `wdb reset-auth` | 让所有已授权的客户端失效，重新生成 PIN 和 token |
+| `wdb update` / `wdb uninstall [--purge]` | 更新 / 卸载 |
+
+## 4. AI 能用的工具
+
+| 类别 | 工具 | 说明 |
+|---|---|---|
+| 状态 | `bridge_status`、`audit_tail` | 主机信息、Shell/Git/Codex 是否可用、审计日志 |
+| 命令 | `shell_exec` | 运行 PowerShell 并等待结果（UTF-8、真实退出码、超时杀整个进程树） |
+| 后台任务 | `shell_start`、`shell_job_status`、`shell_job_list`、`shell_job_kill` | 开发服务器、长时间构建；可等待结束、分页读日志，服务重启后依然可查 |
+| 交互终端 | `pty_start`、`pty_read`、`pty_write`、`pty_resize`、`pty_signal`、`pty_close`、`pty_list` | 真实 Windows ConPTY：Python REPL、ssh、需要回答问题的安装程序、TUI |
+| 文件 | `fs_read`、`fs_write`、`fs_list`、`fs_stat`、`fs_manage` | 分页读取、原子写入、复制/移动/删除/链接 |
+| 改代码 | `apply_patch` | 支持 Codex 的 `*** Begin Patch` 格式（无需 Git）和 git 统一 diff |
+| Codex | `codex_thread_list`、`codex_thread_read`、`codex_thread_turns_list` | 读取本机 Codex CLI 的历史会话 |
+
+详细参数见 [工具参考](skills/windows-developer-bridge/references/tools.md)，与原版 Mac Developer Bridge 的对照见[兼容矩阵](docs/compatibility-matrix.md)。
+
+## 5. 作为 Skill 使用
+
+仓库里的 [`skills/windows-developer-bridge`](skills/windows-developer-bridge/SKILL.md) 是一个 Agent Skill：教 AI 如何安装、启动、连接、排错 WDB，以及怎样用好这些工具。
+
+- **Claude Code / Codex**：一键安装脚本已自动装到 `~/.claude/skills/` 和 `~/.codex/skills/`，直接对它说「帮我启动 Windows Bridge 并告诉我连接地址」即可。
+- **手动安装 / 其他平台**：从 [Releases](https://github.com/Icecream0507/windows-developer-bridge/releases) 下载 `windows-developer-bridge-skill.zip`，解压到 `~/.claude/skills/` 或 `~/.codex/skills/`；claude.ai 可在 设置 → Capabilities → Skills 上传这个 zip。
+- 自己打包：`powershell -File scripts\package-skill.ps1` → `dist\windows-developer-bridge-skill.zip`。
+
+## 6. 安全须知
+
+- 开启完全访问后，AI 以**你当前 Windows 用户的权限**执行命令和改文件，**没有沙箱**。
+- 隧道地址是公网可访问的；连接必须通过 OAuth + 本机 PIN（或静态 token）。**PIN / token 不要发给任何人。**
+- 不用的时候 `wdb stop` 或 `wdb lock`。`wdb lock` 会立即拒绝后续调用并结束正在运行的后台任务和终端。
+- 审计日志只记录工具名、参数名和参数哈希，不记录命令内容或文件内容（`audit_tail` 查看）。
+
+更多见 [SECURITY.md](SECURITY.md)。
+
+## 7. 常见问题
+
+| 现象 | 解决 |
+|---|---|
+| 工具返回 `FULL_ACCESS_LOCKED` | 运行 `wdb unlock` |
+| ChatGPT 提示无法连接 / 404 / 530 | `wdb status` 看隧道是否在线；地址变了就 `wdb restart` 并更新连接器 URL（要带 `/mcp`） |
+| 隧道一直连不上 | 打开代理软件（自动识别 7897/7890/10809 等端口），或在 `config.env` 写 `WDB_PROXY=http://127.0.0.1:端口`，然后 `wdb restart`；`wdb logs tunnel` 看原因 |
+| 授权页提示 PIN 错误 | 用电脑上 `wdb pin` 显示的 9 位数字；连续错 5 次需重新发起授权 |
+| `wdb` 不是命令 | 新开一个终端；或直接运行 `%LOCALAPPDATA%\WindowsDeveloperBridge\bin\wdb.cmd` |
+| 端口 8787 被占用 | `wdb start --port 8788` |
+| 想撤销所有授权 | `wdb reset-auth`，然后在客户端删除并重新添加连接器 |
+
+## 进阶
+
+**配置文件** `%LOCALAPPDATA%\WindowsDeveloperBridge\config.env`（`KEY=VALUE`，改完 `wdb restart`）：
+
+| 键 | 作用 |
+|---|---|
+| `WDB_HTTP_PORT` | 本地端口，默认 `8787` |
+| `WDB_HTTP_TOKEN` | 静态 Bearer token（自动生成，`wdb token` 查看） |
+| `WDB_PROXY` | 隧道使用的代理，如 `http://127.0.0.1:7897`；`off` 表示直连 |
+| `WDB_TUNNEL` | 设为 `none` 则只在本机提供服务 |
+| `CLOUDFLARE_TUNNEL_TOKEN` + `WDB_HTTP_PUBLIC_URL` | 使用自己的 Cloudflare 命名隧道和固定域名（例如 `https://pc.example.com`），地址不再变化 |
+| `WDB_POWERSHELL` | 指定 PowerShell 可执行文件 |
+| `CODEX_BIN` | 指定 Codex CLI |
+
+**不用隧道、本机直连**：`wdb start --local`，地址为 `http://127.0.0.1:8787/mcp`；本机的 Claude Code / Codex 更推荐 stdio 方式（`wdb mcp-config`）。
+
+**手动运行**：`node mcp-http.mjs`（HTTP + OAuth）或 `node bridge.mjs`（stdio MCP）。
+
+**开发与测试**：
 
 ```powershell
 git clone https://github.com/Icecream0507/windows-developer-bridge.git
 cd windows-developer-bridge
-node --version
+node --test                                           # 单元 + 集成测试（Windows 上会跑 PowerShell/ConPTY 用例）
+node tests/e2e-remote.mjs https://xxx.trycloudflare.com --long   # 对运行中的实例做端到端验证
 ```
 
-No `npm install` is needed for the current version; it uses Node.js built-ins.
-
-## 2. Start the authenticated MCP HTTP service
-
-The HTTP adapter supports two auth modes simultaneously: an optional static bearer token (admin) and a built-in OAuth 2.1 authorization server for MCP clients (dynamic registration + PKCE).
-
-Open PowerShell **Terminal A**. If you already have a tunnel hostname, export it first so OAuth metadata advertises the correct issuer:
-
-```powershell
-$env:WDB_HTTP_PORT = "8787"
-# Required for remote OAuth clients; must be the exact public base URL clients use:
-$env:WDB_HTTP_PUBLIC_URL = "https://YOUR-ACTUAL-HOST.trycloudflare.com"
-# Optional static admin token; omit it to run OAuth-only:
-$env:WDB_HTTP_TOKEN = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-node .\mcp-http.mjs
-```
-
-(Or use `start-tunnel.ps1` to get a hostname, put it in `.env.http` as `WDB_HTTP_PUBLIC_URL=...`, then run `start-http.ps1`.)
-
-Keep this terminal open. The startup banner prints the **OAuth consent PIN**, a 9-digit local-operator code also stored in `<dataDir>/oauth/consent.pin`. A remote client can only complete authorization if the person at this machine enters that PIN on the consent page. Save any static token privately; do not put it in URLs, source control, or screenshots.
-
-Default local MCP endpoint: `http://127.0.0.1:8787/mcp`. The service binds to loopback, requires credentials, and also provides `GET /healthz`. OAuth discovery endpoints:
-
-- `GET /.well-known/oauth-protected-resource`
-- `GET /.well-known/oauth-authorization-server`
-- `POST /register` (RFC 7591 dynamic client registration; `https` or loopback `redirect_uris` only)
-- `GET /authorize` (PKCE S256 mandatory, local-operator PIN consent page)
-- `POST /token` (authorization code, refresh-token rotation)
-
-In **Terminal B**, verify local health:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8787/healthz
-```
-
-Expected: JSON containing `ok: true`. Verify the protected endpoint rejects unauthenticated requests (401 is expected):
-
-```powershell
-try { Invoke-WebRequest http://127.0.0.1:8787/mcp -Method Post -ContentType "application/json" -Body '{"jsonrpc":"2.0","id":1,"method":"ping"}' } catch { $_.Exception.Response.StatusCode }
-```
-
-For an authenticated MCP protocol check, in Terminal B set the same token (paste it locally, do not share it):
-
-```powershell
-$env:WDB_HTTP_TOKEN = "PASTE_YOUR_TOKEN_HERE"
-$headers = @{ Authorization = "Bearer $env:WDB_HTTP_TOKEN"; Accept = "application/json, text/event-stream" }
-$body = @{ jsonrpc = "2.0"; id = 1; method = "initialize"; params = @{ protocolVersion = "2025-11-25"; capabilities = @{}; clientInfo = @{ name = "manual-test"; version = "1.0.0" } } } | ConvertTo-Json -Depth 8
-Invoke-RestMethod http://127.0.0.1:8787/mcp -Method Post -Headers $headers -ContentType "application/json" -Body $body
-```
-
-## 3. Start a Cloudflare Quick Tunnel
-
-Install `cloudflared` following [Cloudflare's official instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). On Windows, this may also work:
-
-```powershell
-winget install --id Cloudflare.cloudflared
-```
-
-Once installed, open **Terminal C** and run:
-
-```powershell
-cloudflared tunnel --url http://127.0.0.1:8787 --protocol http2
-# on networks where the Quick Tunnel API is unreachable directly, set HTTPS_PROXY to a local proxy first
-```
-
-Wait for a URL like `https://some-words.trycloudflare.com` in the output. Your MCP URL is the exact URL printed by cloudflared with `/mcp` appended:
-
-`https://YOUR-ACTUAL-HOST.trycloudflare.com/mcp`
-
-**Ordering for OAuth:** because the OAuth issuer must match the public hostname, start the tunnel first, copy the hostname, then start the HTTP adapter with `WDB_HTTP_PUBLIC_URL=https://YOUR-ACTUAL-HOST.trycloudflare.com` (or store it in `.env.http` and use `start-http.ps1`). The hostname is temporary and may change when the tunnel restarts; update the variable and restart the adapter when it does. Keep both processes running; stop with Ctrl+C in Terminal C and then Terminal A.
-
-## 4. Configure your MCP client
-
-Add a **remote MCP / Streamable HTTP** server:
-
-- **Server URL:** `https://YOUR-ACTUAL-HOST.trycloudflare.com/mcp` (replace with the hostname cloudflared printed)
-- **Authentication (OAuth, preferred):** let the client discover and register itself. The flow is:
-  1. client fetches the protected-resource metadata from the MCP endpoint and gets a dynamically issued **client ID** from `POST /register`;
-  2. browser opens `/authorize` and shows the consent page;
-  3. **you**, at this machine, enter the 9-digit consent PIN and approve;
-  4. the client exchanges the PKCE authorization code for an access token (12 h) and refresh token (30 d, rotated on use).
-- **Authentication (static token, optional):** clients that support a custom header can use `Authorization: Bearer YOUR_WDB_HTTP_TOKEN`.
-
-Do not enter the placeholder URL literally, and never append a token to the URL.
-
-**Connector caveats:** the adapter implements OAuth metadata discovery (RFC 9728/RFC 8414), dynamic client registration (RFC 7591), PKCE authorization-code flow, and refresh-token rotation. It does **not** implement SSE/GET streaming on `/mcp` (JSON-RPC `POST` only) and every consent decision requires the local-operator PIN by design — a remote party cannot self-approve. If a connector insists on "No authentication", do not use that option; it is unsupported by design. Redirect URIs must be `https` or RFC 8252 loopback addresses (`http://127.0.0.1`/`http://localhost`, any port).
-
-## 5. Enable local tools deliberately
-
-The bridge starts with privileged tools locked. `bridge_status` can report status while locked, but shell and filesystem operations require the local unlock file. First call `bridge_status` and inspect its `unlockFile` field; on a standard Windows profile this is normally `%LOCALAPPDATA%\WindowsDeveloperBridge\FULL_ACCESS_ENABLED`.
-
-Read [SECURITY.md](SECURITY.md) before enabling it. Create an empty file at the exact path returned by `bridge_status` to unlock, and remove that same file to lock again. Only do this if you understand that enabled commands and file operations run with your Windows user's permissions. This is not a sandbox, and a public tunnel means remote parties can attempt to reach the service. Keep the token private and stop the tunnel when not in use.
-
-## Troubleshooting
-
-| Problem | Check |
-|---|---|
-| Token too short/missing | Set `WDB_HTTP_TOKEN` to a fresh random token as shown above. |
-| Local health works, remote URL fails | Keep both processes running; use the current Quick Tunnel hostname and append `/mcp`. |
-| `401 Unauthorized` | Supply `Authorization: Bearer <token>`; verify the client supports custom bearer headers. |
-| `404 Not found` | Endpoint is `/mcp`, not the root URL. |
-| `cloudflared` not recognized | Install it from Cloudflare's official guide and reopen PowerShell. |
-| Tools report full access locked | Check the `unlockFile` returned by `bridge_status` and review `SECURITY.md`. |
-| Client rejects OAuth metadata / issuer mismatch | Set `WDB_HTTP_PUBLIC_URL` to the exact public base URL clients use and restart the adapter. |
-| Consent page PIN unknown | Read the startup banner or `<dataDir>/oauth/consent.pin` on the bridge machine; never share it remotely. |
-| Connector only offers "no authentication" | Unsupported by design; configure OAuth or a static bearer header instead. |
-
-## Development and tests
-
-```powershell
-node --check .\bridge.mjs
-node --check .\mcp-http.mjs
-node --test
-```
-
-The current automated suite primarily tests the stdio bridge. Dedicated HTTP auth, Cloudflare, OAuth/SSE, and Windows process-containment end-to-end tests are still needed.
-
-## Implemented and missing
-
-Initial implementation includes MCP stdio protocol, local PowerShell/filesystem/job tools, patch application, Codex history adapter, audit log, fail-closed unlock latch, and an HTTP JSON-RPC adapter with static bearer auth plus an OAuth 2.1 server (RFC 9728/8414 metadata, RFC 7591 dynamic client registration, PKCE, refresh rotation, PIN-gated local-operator consent). Still missing or unverified: SSE/streaming transport, full original tool/schema parity, ConPTY, Chrome extension/native messaging, browser workspace, hardened Windows process containment, and complete revocation lifecycle. See [TODO.md](TODO.md) and [compatibility matrix](docs/compatibility-matrix.md).
-
-## Security
-
-The HTTP service binds to loopback by default. Cloudflare Quick Tunnels create a publicly reachable URL; bearer authentication is mandatory but is not a substitute for restricting access. Use a unique high-entropy token and stop the tunnel when it is not needed. See [SECURITY.md](SECURITY.md).
+路线图见 [TODO.md](TODO.md)。Chrome 浏览器相关工具尚未移植。

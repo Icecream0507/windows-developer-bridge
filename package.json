@@ -1,17 +1,19 @@
 {
   "name": "windows-developer-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Windows-first compatibility port of Mac Developer Bridge (MDB).",
+  "description": "Windows-first MCP bridge: PowerShell, files, background jobs, ConPTY terminals and patches for ChatGPT/Claude, with OAuth and Cloudflare tunnel.",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "start": "node bridge.mjs",
-    "check": "node --check bridge.mjs && node --check mcp-http.mjs && node --check mcp-oauth.mjs",
+    "start:http": "node mcp-http.mjs",
+    "check": "node --check bridge.mjs && node --check mcp-http.mjs && node --check mcp-oauth.mjs && node --check lib/patch.mjs && node --check lib/pty.mjs",
     "test": "node --test",
-    "start:http": "node mcp-http.mjs"
+    "e2e": "node tests/e2e-remote.mjs",
+    "package:skill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-skill.ps1"
   },
   "repository": {
     "type": "git",

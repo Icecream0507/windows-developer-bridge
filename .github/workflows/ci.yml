@@ -8,12 +8,25 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
       - name: Check syntax
-        run: node --check bridge.mjs
+        run: npm run check
       - name: Run tests
         run: node --test
+      - name: Package skill
+        if: matrix.node == 22
+        shell: powershell
+        run: .\scripts\package-skill.ps1
+      - uses: actions/upload-artifact@v4
+        if: matrix.node == 22
+        with:
+          name: windows-developer-bridge-skill
+          path: dist/windows-developer-bridge-skill.zip

@@ -191,4 +191,21 @@ test("OAuth 2.1 dynamic registration, PKCE code flow, consent PIN, refresh rotat
     body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refresh_token }),
   });
   assert.equal(oldRefresh.status, 400);
+
+  // RFC 7009 撤销：撤销 access token 后 MCP 立即 401，对应 refresh token 也失效
+  const revoked = await fetch(`${base}/revoke`, {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token: refreshed.access_token }),
+  });
+  assert.equal(revoked.status, 200);
+  const afterRevoke = await fetch(`${base}/mcp`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${refreshed.access_token}` },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" }),
+  });
+  assert.equal(afterRevoke.status, 401);
+  const refreshAfterRevoke = await fetch(`${base}/token`, {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshed.refresh_token }),
+  });
+  assert.equal(refreshAfterRevoke.status, 400);
 });

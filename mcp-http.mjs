@@ -4,17 +4,37 @@ import crypto from "node:crypto";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import os from "node:os";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createOAuthStore } from "./mcp-oauth.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// `wdb` 把 token/端口等写在 <数据目录>/config.env；已存在的环境变量优先
+function loadConfigEnv() {
+  const dataDir = process.env.WDB_DATA_DIR || (process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "WindowsDeveloperBridge") : path.join(os.homedir(), ".windows-developer-bridge"));
+  let text;
+  try { text = fs.readFileSync(path.join(dataDir, "config.env"), "utf8"); } catch { return; }
+  for (const line of text.replace(/^﻿/, "").split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+    if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2].trim();
+  }
+}
+loadConfigEnv();
 const BRIDGE = process.env.WDB_BRIDGE_ENTRY || path.join(ROOT, "bridge.mjs");
 const HOST = process.env.WDB_HTTP_HOST || "127.0.0.1";
 const PORT = Number(process.env.WDB_HTTP_PORT || 8787);
-// 对外可达地址：Cloudflare 隧道场景必须设成 https://<随机名>.trycloudflare.com，否则 OAuth 元数据里的 issuer 不匹配
-const PUBLIC_URL = (process.env.WDB_HTTP_PUBLIC_URL || `http://${HOST}:${PORT}`).replace(/\/+$/, "");
+// 对外可达地址（OAuth issuer）。未设置时按请求的 Host / X-Forwarded-Proto 自动推导，
+// 这样 Cloudflare Quick Tunnel 换了随机域名也无需重启服务。
+const PUBLIC_URL = (process.env.WDB_HTTP_PUBLIC_URL || "").trim().replace(/\/+$/, "");
+const LOCAL_URL = `http://${HOST.includes(":") ? `[${HOST}]` : HOST}:${PORT}`;
 const TOKEN = process.env.WDB_HTTP_TOKEN || "";
 const MAX_BODY = 8 * 1024 * 1024;
+// 工具调用最长 30 分钟（shell_exec 上限），留出余量
+const RPC_TIMEOUT_MS = 31 * 60 * 1000;
+// SSE 心跳：Cloudflare 在 100 秒无响应字节时返回 524，长任务必须持续写字节
+const KEEPALIVE_MS = Number(process.env.WDB_HTTP_KEEPALIVE_MS || 15000);
+const SSE_ENABLED = process.env.WDB_HTTP_SSE !== "0";
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error("WDB_HTTP_PORT must be 1..65535");
 // 静态 Bearer Token 为可选的管理通道；不设置时仅使用 OAuth 动态颁发的令牌
 let tokenDigest = null;
@@ -64,7 +84,7 @@ function rpc(message) {
   }
   const id = String(nextId++);
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pending.delete(id); reject(new Error("MCP request timed out")); }, 600000);
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error("MCP request timed out")); }, RPC_TIMEOUT_MS);
     pending.set(id, { resolve: result => resolve({ ...result, id: message.id }), reject, timer });
     try { proc.stdin.write(JSON.stringify({ ...message, id }) + "\n"); }
     catch (error) { clearTimeout(timer); pending.delete(id); reject(error); }
@@ -96,15 +116,53 @@ function sendJson(res, status, value, extra = {}) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body), "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra });
   res.end(body);
 }
+function publicBase(req) {
+  if (PUBLIC_URL) return PUBLIC_URL;
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+  if (!/^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$/.test(host)) return LOCAL_URL;
+  const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const proto = forwarded === "https" || forwarded === "http" ? forwarded : String(req.headers["cf-visitor"] || "").includes("https") ? "https" : "http";
+  return `${proto}://${host}`;
+}
+function toolName(message) {
+  return message && message.method === "tools/call" && message.params && typeof message.params.name === "string" ? message.params.name : null;
+}
+function log(line) { process.stderr.write(`[http] ${new Date().toISOString()} ${line}\n`); }
+// MCP Streamable HTTP 允许以 text/event-stream 回应 POST。工具调用走 SSE，先立即写出响应头，
+// 之后每 KEEPALIVE_MS 写一次注释心跳（或客户端请求了 progressToken 时写 progress 通知），
+// 避免 Cloudflare 100 秒超时，也让客户端知道任务仍在运行。
+async function streamResponses(req, res, batch) {
+  res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-store, no-transform", "x-accel-buffering": "no", "x-content-type-options": "nosniff" });
+  res.write(": stream open\n\n");
+  const writeEvent = message => { if (!res.writableEnded) res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`); };
+  const tokens = batch.map(m => m && m.params && m.params._meta ? m.params._meta.progressToken : undefined).filter(t => typeof t === "string" || typeof t === "number");
+  let ticks = 0;
+  const heartbeat = setInterval(() => {
+    ticks += 1;
+    if (tokens.length) for (const token of tokens) writeEvent({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: token, progress: ticks, message: `still running (${Math.round(ticks * KEEPALIVE_MS / 1000)}s)` } });
+    else if (!res.writableEnded) res.write(": keepalive\n\n");
+  }, KEEPALIVE_MS);
+  try {
+    const results = await Promise.all(batch.map(message => rpc(message).catch(error => ({ jsonrpc: "2.0", id: message?.id ?? null, error: { code: -32603, message: error.message || "Bridge request failed" } }))));
+    for (const result of results) if (result !== null) writeEvent(result);
+  } finally {
+    clearInterval(heartbeat);
+    res.end();
+  }
+}
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/healthz") {
     return sendJson(res, 200, { ok: true, service: "windows-developer-bridge-http", bridgeRunning: Boolean(child && child.exitCode === null) });
   }
-  if (await oauth.handle(req, res, PUBLIC_URL)) return;
+  const base = publicBase(req);
+  if (req.method === "GET" && url.pathname === "/") {
+    return sendJson(res, 200, { service: "windows-developer-bridge", mcp: base + "/mcp", health: base + "/healthz", auth: "OAuth 2.1 (PIN consent) or static bearer token" });
+  }
+  if (await oauth.handle(req, res, base)) return;
   if (url.pathname !== "/mcp") return sendJson(res, 404, { error: "Not found" });
   if (!authorized(req)) {
-    const meta = PUBLIC_URL + "/.well-known/oauth-protected-resource";
+    const meta = base + "/.well-known/oauth-protected-resource";
     return sendJson(res, 401, { error: "Unauthorized" }, { "www-authenticate": `Bearer resource_metadata="${meta}"` });
   }
   if (req.method === "GET") return sendJson(res, 405, { error: "MCP GET/SSE is not implemented; send JSON-RPC POST requests." }, { allow: "POST, OPTIONS" });
@@ -112,14 +170,27 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, { allow: "POST, OPTIONS" }); return res.end(); }
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" }, { allow: "POST, OPTIONS" });
   if (!(req.headers["content-type"] || "").toLowerCase().includes("application/json")) return sendJson(res, 415, { error: "Content-Type must be application/json" });
+  const started = Date.now();
+  let label = "POST /mcp";
   try {
     const body = await readBody(req);
     const batch = Array.isArray(body) ? body : [body];
     if (!batch.length) return sendJson(res, 400, { error: "Empty JSON-RPC batch" });
+    const tools = batch.map(toolName).filter(Boolean);
+    label = batch.map(m => (m && m.method) || "?").join(",") + (tools.length ? ` ${tools.join(",")}` : "");
+    const accept = String(req.headers.accept || "");
+    if (SSE_ENABLED && tools.length && accept.includes("text/event-stream")) {
+      await streamResponses(req, res, batch);
+      if (tools.length) log(`${label} sse ${Date.now() - started}ms`);
+      return;
+    }
     const results = (await Promise.all(batch.map(rpc))).filter(x => x !== null);
+    if (tools.length) log(`${label} ${Date.now() - started}ms`);
     if (!results.length) { res.writeHead(202); return res.end(); }
     return sendJson(res, 200, Array.isArray(body) ? results : results[0]);
   } catch (error) {
+    log(`${label} failed: ${error.message}`);
+    if (res.headersSent) { res.end(); return; }
     return sendJson(res, error.status || 502, { error: error.message || "Bridge request failed" });
   }
 });
@@ -128,7 +199,7 @@ await oauth.init();
 delete process.env.WDB_OAUTH_CONSENT_PIN; // 仅供 oauth.init 读取生成/接受的操作员 PIN
 server.listen(PORT, HOST, () => {
   process.stderr.write("Windows Developer Bridge HTTP listening at http://" + HOST + ":" + PORT + "/mcp\n");
-  process.stderr.write("Public base URL: " + PUBLIC_URL + "\n");
+  process.stderr.write("Public base URL: " + (PUBLIC_URL || "auto (derived from each request's Host / X-Forwarded-Proto)") + "\n");
   process.stderr.write("Static bearer token: " + (tokenDigest ? "enabled" : "disabled (OAuth only)") + "\n");
   process.stderr.write("OAuth consent PIN (local operator only): " + oauth.getPin() + "\n");
 });

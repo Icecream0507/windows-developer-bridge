@@ -202,8 +202,9 @@ export function createOAuthStore() {
     if (!/^[A-Za-z0-9_-]{43,128}$/.test(String(params.code_challenge))) return fail("invalid_request", "code_challenge 格式无效");
     // scope 宽松处理：接受缺省或任意客户端请求值，实际只颁发 mcp
     if (params.resource) {
-      const allowed = [baseUrl, baseUrl + "/mcp"];
-      if (!allowed.includes(params.resource)) return fail("invalid_target", "resource 与本服务器地址不匹配");
+      const norm = value => String(value).replace(/\/+$/, "");
+      const allowed = [norm(baseUrl), norm(baseUrl) + "/mcp"];
+      if (!allowed.includes(norm(params.resource))) return fail("invalid_target", "resource 与本服务器地址不匹配");
     }
     const id = randomToken(16);
     pending.set(id, {
@@ -314,6 +315,18 @@ export function createOAuthStore() {
     return record;
   }
 
+  function revoke(raw) {
+    if (!raw) return;
+    const hash = sha256(raw);
+    const access = accessTokens.get(hash);
+    if (access) { accessTokens.delete(hash); if (access.refreshHash) refreshTokens.delete(access.refreshHash); }
+    if (refreshTokens.has(hash)) {
+      refreshTokens.delete(hash);
+      for (const [h, r] of accessTokens) if (r.refreshHash === hash) accessTokens.delete(h);
+    }
+    saveTokens();
+  }
+
   function metadata(baseUrl) {
     return {
       protectedResource: {
@@ -327,6 +340,8 @@ export function createOAuthStore() {
         authorization_endpoint: baseUrl + "/authorize",
         token_endpoint: baseUrl + "/token",
         registration_endpoint: baseUrl + "/register",
+        revocation_endpoint: baseUrl + "/revoke",
+        revocation_endpoint_auth_methods_supported: ["none"],
         code_challenge_methods_supported: ["S256"],
         response_types_supported: ["code"],
         grant_types_supported: ["authorization_code", "refresh_token"],
@@ -367,7 +382,7 @@ export function createOAuthStore() {
     const routes = [
       "/.well-known/oauth-protected-resource",
       "/.well-known/oauth-authorization-server",
-      "/register", "/authorize", "/authorize/approve", "/token",
+      "/register", "/authorize", "/authorize/approve", "/token", "/revoke",
     ];
     if (!routes.includes(p)) return false;
     if (req.method === "OPTIONS") { res.writeHead(204, corsHeaders); res.end(); return true; }
@@ -403,6 +418,13 @@ export function createOAuthStore() {
           return res.end();
         }
         return html(outcome.status || 200, outcome.html);
+      }
+      if (p === "/revoke") {
+        // RFC 7009：撤销 access 或 refresh token；未知 token 也返回 200
+        if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
+        const form = Object.fromEntries(new URLSearchParams(await readSmallBody(req)));
+        revoke(String(form.token || ""));
+        return json(200, {});
       }
       if (p === "/token") {
         if (req.method !== "POST") return json(405, { error: "method_not_allowed" });
