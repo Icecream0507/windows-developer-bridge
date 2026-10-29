@@ -16,15 +16,17 @@ const OAUTH_DIR = path.join(DATA_DIR, "oauth");
 const CLIENTS_FILE = path.join(OAUTH_DIR, "clients.json");
 const TOKENS_FILE = path.join(OAUTH_DIR, "tokens.json");
 const PIN_FILE = path.join(OAUTH_DIR, "consent.pin");
+const PIN_LOCKOUT_FILE = path.join(OAUTH_DIR, "pin-lockout.json");
 
 const ACCESS_TTL_MS = 12 * 60 * 60 * 1000;      // 12 hours
 const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const CODE_TTL_MS = 5 * 60 * 1000;
 const AUTHREQ_TTL_MS = 10 * 60 * 1000;
 const SCOPE = "mcp";
-const MAX_PIN_ATTEMPTS = 5;
-const MAX_GLOBAL_PIN_FAILURES = 30; // per PIN_FAILURE_WINDOW
+const MAX_PIN_ATTEMPTS = 10;
+const MAX_GLOBAL_PIN_FAILURES = 10; // lock after 10 failures in the rolling window
 const PIN_FAILURE_WINDOW = 10 * 60 * 1000;
+const PIN_LOCKOUT_MS = 15 * 60 * 1000;
 const MAX_BODY = 65536;
 
 const randomToken = bytes => crypto.randomBytes(bytes).toString("hex");
@@ -110,6 +112,7 @@ export function createOAuthStore() {
   const pending = new Map(); // authRequestId -> {clientId, redirectUri, state, scope, challenge, exp, attempts}
   const authCodes = new Map(); // sha256(code) -> {clientId, redirectUri, challenge, scope, exp}
   const pinFailures = []; // timestamps of global PIN failures
+  let pinLockedUntil = 0;
   let pin = null;
   let clientsLoaded = false;
 
@@ -137,13 +140,18 @@ export function createOAuthStore() {
       for (const [h, r] of Object.entries(raw.access || {})) if (r && r.exp > Date.now()) accessTokens.set(h, r);
       for (const [h, r] of Object.entries(raw.refresh || {})) if (r && r.exp > Date.now()) refreshTokens.set(h, r);
     } catch (error) { if (error.code !== "ENOENT") throw error; }
+    try {
+      const lockout = JSON.parse(await fsp.readFile(PIN_LOCKOUT_FILE, "utf8"));
+      if (Array.isArray(lockout.failures)) pinFailures.push(...lockout.failures.filter(n => Number.isFinite(n) && n > Date.now() - PIN_FAILURE_WINDOW));
+      if (Number.isFinite(lockout.lockedUntil) && lockout.lockedUntil > Date.now()) pinLockedUntil = lockout.lockedUntil;
+    } catch (error) { if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error; }
     if (process.env.WDB_OAUTH_CONSENT_PIN) {
       pin = String(process.env.WDB_OAUTH_CONSENT_PIN);
     } else {
       try { pin = (await fsp.readFile(PIN_FILE, "utf8")).trim(); }
       catch (error) {
         if (error.code !== "ENOENT") throw error;
-        pin = Array.from({ length: 9 }, () => crypto.randomInt(0, 10)).join("");
+        pin = crypto.randomBytes(16).toString("hex");
         await atomicWrite(PIN_FILE, pin + "\n");
       }
     }
@@ -223,8 +231,8 @@ export function createOAuthStore() {
       <form method="post" action="/authorize/approve">
         <input type="hidden" name="auth_request_id" value="${escapeHtml(id)}">
         <label for="pin">操作员授权 PIN（在运行 WDB 的本机查看）：</label><br><br>
-        <input id="pin" name="pin" inputmode="numeric" autocomplete="off" required autofocus
-          placeholder="9 位数字" pattern="[0-9]{9}" maxlength="9" style="width:180px;letter-spacing:2px"><br><br>
+        <input id="pin" name="pin" inputmode="text" autocomplete="off" required autofocus
+          placeholder="32 位十六进制授权密钥" pattern="[a-fA-F0-9]{32}" maxlength="32" style="width:180px;letter-spacing:2px"><br><br>
         <button class="ok" type="submit" name="decision" value="approve">批准授权</button>
         <button class="deny" type="submit" name="decision" value="deny">拒绝</button>
       </form>
@@ -245,12 +253,20 @@ export function createOAuthStore() {
     }
     const now = Date.now();
     while (pinFailures.length && pinFailures[0] < now - PIN_FAILURE_WINDOW) pinFailures.shift();
+    if (pinLockedUntil > now) {
+      return { kind: "html", status: 429, html: errorPage(`PIN 已锁定，请约 ${Math.ceil((pinLockedUntil - now) / 60000)} 分钟后再试。`) };
+    }
+    if (pinLockedUntil && pinLockedUntil <= now) pinLockedUntil = 0;
     if (pinFailures.length >= MAX_GLOBAL_PIN_FAILURES) {
-      return { kind: "html", status: 429, html: errorPage("PIN 错误次数过多，请 10 分钟后再试。") };
+      pinLockedUntil = now + PIN_LOCKOUT_MS;
+      void atomicWrite(PIN_LOCKOUT_FILE, JSON.stringify({ failures: pinFailures, lockedUntil: pinLockedUntil }, null, 2));
+      return { kind: "html", status: 429, html: errorPage("PIN 错误次数过多，已锁定 15 分钟。") };
     }
     const supplied = String(form.pin || "").replace(/\s+/g, "");
     if (!timingSafeEqual(supplied, pin)) {
       pinFailures.push(now);
+      if (pinFailures.length >= MAX_GLOBAL_PIN_FAILURES) pinLockedUntil = now + PIN_LOCKOUT_MS;
+      void atomicWrite(PIN_LOCKOUT_FILE, JSON.stringify({ failures: pinFailures, lockedUntil: pinLockedUntil }, null, 2));
       record.attempts += 1;
       if (record.attempts >= MAX_PIN_ATTEMPTS) {
         pending.delete(id);
