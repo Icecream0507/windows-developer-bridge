@@ -36,7 +36,7 @@ MCP 地址（填到 ChatGPT 等客户端）: https://xxxx-xxxx.trycloudflare.com
 
 ## 2. 连接 ChatGPT（3 步）
 
-1. ChatGPT → **设置 → 应用 / Apps & Connectors → 高级设置**，打开 **开发者模式**（Developer mode）。
+1. ChatGPT → **设置 → 集成/插件 → 右上角浏览目录 → 右上角添加 → 添加自定义MCP** ，打开 **开发者模式**（Developer mode）。
 2. 点 **创建 / 添加连接器**：名称随意（如 `Windows`），**MCP 服务器 URL** 粘贴上面的地址（以 `/mcp` 结尾），**认证方式选 OAuth**。
 3. 浏览器弹出授权页 → 输入电脑上显示的 **PIN** → **批准授权**。
 
