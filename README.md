@@ -2,6 +2,8 @@
 
 [![Windows CI](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/Icecream0507/windows-developer-bridge/actions/workflows/ci.yml) [![MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+**ChatGPT网页端、Claude网页端摇身一变成为Codex、Claude Code**
+
 把你的 Windows 电脑变成一个 **MCP 服务器**：ChatGPT、Claude 等 AI 可以远程在这台电脑上执行 PowerShell、读写文件、跑后台任务、操作交互式终端、打补丁改代码。
 
 - 零依赖：只需要 Node.js 20+（安装脚本会自动装）
